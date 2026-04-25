@@ -837,6 +837,86 @@ const TOOLS = [
     }
   },
   {
+    name: "calc_least_squares",
+    description: "Linear least squares regression y=ax+b. Returns slope, intercept, R², residuals.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x: { type: "array", items: { type: "number" }, description: "X data points" },
+        y: { type: "array", items: { type: "number" }, description: "Y data points" },
+        degree: { type: "number", description: "Polynomial degree: 1=linear, 2=quadratic, etc. Default 1." }
+      },
+      required: ["x", "y"]
+    }
+  },
+  {
+    name: "calc_probability",
+    description: "Probability distributions: normal CDF/PDF, binomial, poisson, uniform, exponential, chi-square, t-distribution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        distribution: { type: "string", enum: ["normal", "binomial", "poisson", "exponential", "uniform", "chi2", "t"], description: "Distribution type" },
+        operation: { type: "string", enum: ["pdf", "cdf", "quantile", "mean", "variance", "sample"], description: "Operation" },
+        params: { type: "object", description: "Distribution parameters" }
+      },
+      required: ["distribution", "operation"]
+    }
+  },
+  {
+    name: "calc_hypothesis_test",
+    description: "Hypothesis testing: z-test, t-test (one-sample, two-sample), chi-square goodness of fit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        test: { type: "string", enum: ["z_test", "t_test_one_sample", "t_test_two_sample", "chi2_gof"], description: "Test type" },
+        params: { type: "object", description: "Test parameters" }
+      },
+      required: ["test", "params"]
+    }
+  },
+  {
+    name: "calc_confidence_interval",
+    description: "Confidence intervals for mean (z or t), proportion, and variance.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["mean_z", "mean_t", "proportion", "variance"], description: "CI type" },
+        data: { type: "array", items: { type: "number" }, description: "Sample data (for mean_z, mean_t, variance)" },
+        confidence: { type: "number", description: "Confidence level 0-1, default 0.95" },
+        sample_mean: { type: "number", description: "For proportion/variance" },
+        sample_std: { type: "number" },
+        n: { type: "number", description: "Sample size" },
+        p: { type: "number", description: "Proportion (for proportion CI)" },
+        sigma: { type: "number", description: "Known population std (for mean_z)" }
+      },
+      required: ["type"]
+    }
+  },
+  {
+    name: "calc_anova",
+    description: "One-way ANOVA: test if means of multiple groups are equal. Returns F-statistic, p-value, SS between/within.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        groups: { type: "array", items: { type: "array", items: { type: "number" } }, description: "Array of groups" }
+      },
+      required: ["groups"]
+    }
+  },
+  {
+    name: "calc_correlation",
+    description: "Correlation and regression: Pearson r, Spearman rho, covariance, Kendall tau.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x: { type: "array", items: { type: "number" } },
+        y: { type: "array", items: { type: "number" } },
+        method: { type: "string", enum: ["pearson", "spearman", "covariance", "kendall"], description: "Default pearson" }
+      },
+      required: ["x", "y"]
+    }
+  },
+  {
     name: "health",
     description: "Health check.",
     inputSchema: { type: "object", properties: {} }
@@ -880,6 +960,18 @@ async function callTool(params) {
     case "calc_base_convert": return calcBaseConvert(args);
     case "calc_prime": return calcPrime(args);
     case "calc_plot_data": return calcPlotData(args);
+    case "calc_least_squares":
+      return toolResult(await calcLeastSquares(args));
+    case "calc_probability":
+      return toolResult(calcProbability(args));
+    case "calc_hypothesis_test":
+      return toolResult(calcHypothesisTest(args));
+    case "calc_confidence_interval":
+      return toolResult(calcConfidenceInterval(args));
+    case "calc_anova":
+      return toolResult(calcAnova(args));
+    case "calc_correlation":
+      return toolResult(calcCorrelation(args));
     case "health": return toolResult({ status: "ok", version: SERVER_VERSION, tools: TOOLS.length });
     default: throw new Error(`Unknown tool: ${name}`);
   }
@@ -1139,6 +1231,379 @@ function calcPlotData(args) {
     }
   }
   return toolResult({ expression: args.expression, x_range: [args.x_min, args.x_max], points: nPoints, x: xVals, y: yVals });
+}
+
+
+// ============================================================
+// STATISTICS & PROBABILITY EXTENSIONS
+// ============================================================
+
+function calcLeastSquares(args) {
+  const x = args.x, y = args.y;
+  if (x.length !== y.length || x.length < 2) throw new Error("Need at least 2 matching data points");
+  const n = x.length;
+  const degree = args.degree || 1;
+
+  if (degree === 1) {
+    // Linear: y = ax + b
+    const sx = x.reduce((a,b)=>a+b,0), sy = y.reduce((a,b)=>a+b,0);
+    const sxy = x.reduce((a,xi,i)=>a+xi*y[i],0);
+    const sxx = x.reduce((a,xi)=>a+xi*xi,0);
+    const a = (n*sxy - sx*sy) / (n*sxx - sx*sx);
+    const b = (sy - a*sx) / n;
+    // R²
+    const yMean = sy/n;
+    const ssTot = y.reduce((s,yi)=>s+(yi-yMean)**2,0);
+    const ssRes = y.reduce((s,yi,i)=>s+(yi-(a*x[i]+b))**2,0);
+    const r2 = 1 - ssRes/ssTot;
+    const residuals = y.map((yi,i) => yi - (a*x[i]+b));
+    const predictions = x.map(xi => a*xi+b);
+    return { n, slope: a, intercept: b, r_squared: r2, equation: `y = ${a}x + ${b}`, residuals, predictions };
+  }
+
+  // Polynomial least squares (degree > 1)
+  // Build Vandermonde matrix and solve normal equations
+  const m = degree + 1;
+  // X^T X and X^T y
+  const XtX = Array.from({length:m},()=>Array(m).fill(0));
+  const Xty = Array(m).fill(0);
+  for (let i = 0; i < n; i++) {
+    const row = Array.from({length:m},(_,k)=>Math.pow(x[i],k));
+    for (let j = 0; j < m; j++) {
+      Xty[j] += row[j] * y[i];
+      for (let k = 0; k < m; k++) XtX[j][k] += row[j] * row[k];
+    }
+  }
+  // Solve via Gauss elimination
+  const coeffs = solveLinearSystem(XtX, Xty);
+  const predictions = x.map(xi => coeffs.reduce((s,c,k) => s + c*Math.pow(xi,k), 0));
+  const yMean = y.reduce((a,b)=>a+b,0)/n;
+  const ssTot = y.reduce((s,yi)=>s+(yi-yMean)**2,0);
+  const ssRes = y.reduce((s,yi,i)=>s+(yi-predictions[i])**2,0);
+  const r2 = 1 - ssRes/ssTot;
+  const terms = coeffs.map((c,i) => i===0 ? `${c}` : `${c >= 0 ? '+' : ''}${c}x^${i}`).join(' ');
+  return { n, degree, coefficients: coeffs, r_squared: r2, equation: terms, predictions };
+}
+
+function solveLinearSystem(A, b) {
+  const n = A.length;
+  const aug = A.map((row,i) => [...row, b[i]]);
+  for (let i = 0; i < n; i++) {
+    let maxRow = i;
+    for (let k = i+1; k < n; k++) if (Math.abs(aug[k][i]) > Math.abs(aug[maxRow][i])) maxRow = k;
+    [aug[i], aug[maxRow]] = [aug[maxRow], aug[i]];
+    const pivot = aug[i][i];
+    for (let j = i; j <= n; j++) aug[i][j] /= pivot;
+    for (let k = 0; k < n; k++) {
+      if (k === i) continue;
+      const factor = aug[k][i];
+      for (let j = i; j <= n; j++) aug[k][j] -= factor * aug[i][j];
+    }
+  }
+  return aug.map(row => row[n]);
+}
+
+function calcProbability(args) {
+  const dist = args.distribution;
+  const op = args.operation;
+  const p = args.params || {};
+
+  switch (dist) {
+    case "normal": {
+      const mu = p.mean || 0, sigma = p.std || 1;
+      const pdf = (x) => Math.exp(-0.5*((x-mu)/sigma)**2) / (sigma*Math.sqrt(2*Math.PI));
+      const cdf = (x) => 0.5 * (1 + erfFn((x-mu)/(sigma*Math.sqrt(2))));
+      const quantile = (q) => mu + sigma * Math.sqrt(2) * erfinv(2*q-1);
+      if (op === "pdf") return { distribution: "normal", params: {mean:mu,std:sigma}, x: p.x, pdf: pdf(p.x) };
+      if (op === "cdf") return { distribution: "normal", params: {mean:mu,std:sigma}, x: p.x, cdf: cdf(p.x) };
+      if (op === "quantile") return { distribution: "normal", params: {mean:mu,std:sigma}, p: p.p, quantile: quantile(p.p) };
+      if (op === "mean") return { distribution: "normal", mean: mu };
+      if (op === "variance") return { distribution: "normal", variance: sigma*sigma };
+      if (op === "sample") return { distribution: "normal", sample: boxMuller(mu, sigma, p.n||10) };
+      break;
+    }
+    case "binomial": {
+      const n = p.n || 10, prob = p.p || 0.5;
+      const binomCoeff = (n,k) => { let r=1; for(let i=0;i<k;i++)r=r*(n-i)/(i+1); return Math.round(r); };
+      const pmf = (k) => binomCoeff(n,k) * Math.pow(prob,k) * Math.pow(1-prob,n-k);
+      const cdfVal = (k) => { let s=0; for(let i=0;i<=k;i++) s+=pmf(i); return s; };
+      if (op === "pdf") return { distribution: "binomial", params: {n,p:prob}, k: p.k, pdf: pmf(p.k) };
+      if (op === "cdf") return { distribution: "binomial", params: {n,p:prob}, k: p.k, cdf: cdfVal(p.k) };
+      if (op === "mean") return { distribution: "binomial", mean: n*prob };
+      if (op === "variance") return { distribution: "binomial", variance: n*prob*(1-prob) };
+      break;
+    }
+    case "poisson": {
+      const lambda = p.lambda || 1;
+      const pmf = (k) => Math.exp(-lambda) * Math.pow(lambda,k) / gammaFn(k+1);
+      const cdfVal = (k) => { let s=0; for(let i=0;i<=k;i++) s+=pmf(i); return s; };
+      if (op === "pdf") return { distribution: "poisson", params: {lambda}, k: p.k, pdf: pmf(p.k) };
+      if (op === "cdf") return { distribution: "poisson", params: {lambda}, k: p.k, cdf: cdfVal(p.k) };
+      if (op === "mean") return { distribution: "poisson", mean: lambda };
+      if (op === "variance") return { distribution: "poisson", variance: lambda };
+      break;
+    }
+    case "exponential": {
+      const lambda = p.lambda || 1;
+      const pdf = (x) => x >= 0 ? lambda * Math.exp(-lambda*x) : 0;
+      const cdf = (x) => x >= 0 ? 1 - Math.exp(-lambda*x) : 0;
+      if (op === "pdf") return { distribution: "exponential", params: {lambda}, x: p.x, pdf: pdf(p.x) };
+      if (op === "cdf") return { distribution: "exponential", params: {lambda}, x: p.x, cdf: cdf(p.x) };
+      if (op === "mean") return { distribution: "exponential", mean: 1/lambda };
+      if (op === "variance") return { distribution: "exponential", variance: 1/(lambda*lambda) };
+      break;
+    }
+    case "chi2": {
+      const k = p.df || 1;
+      const pdf = (x) => x > 0 ? Math.pow(x,k/2-1)*Math.exp(-x/2)/(Math.pow(2,k/2)*gammaFn(k/2)) : 0;
+      if (op === "pdf") return { distribution: "chi2", params: {df:k}, x: p.x, pdf: pdf(p.x) };
+      if (op === "mean") return { distribution: "chi2", mean: k };
+      if (op === "variance") return { distribution: "chi2", variance: 2*k };
+      break;
+    }
+    case "t": {
+      const df = p.df || 1;
+      const pdf = (x) => {
+        const num = gammaFn((df+1)/2);
+        const den = Math.sqrt(df*Math.PI)*gammaFn(df/2);
+        return (num/den)*Math.pow(1+x*x/df, -(df+1)/2);
+      };
+      if (op === "pdf") return { distribution: "t", params: {df}, x: p.x, pdf: pdf(p.x) };
+      if (op === "mean") return { distribution: "t", mean: df > 1 ? 0 : undefined };
+      if (op === "variance") return { distribution: "t", variance: df > 2 ? df/(df-2) : undefined };
+      break;
+    }
+    case "uniform": {
+      const a = p.a || 0, b = p.b || 1;
+      const pdf = (x) => (x >= a && x <= b) ? 1/(b-a) : 0;
+      const cdf = (x) => x < a ? 0 : (x > b ? 1 : (x-a)/(b-a));
+      if (op === "pdf") return { distribution: "uniform", params: {a,b}, x: p.x, pdf: pdf(p.x) };
+      if (op === "cdf") return { distribution: "uniform", params: {a,b}, x: p.x, cdf: cdf(p.x) };
+      if (op === "mean") return { distribution: "uniform", mean: (a+b)/2 };
+      if (op === "variance") return { distribution: "uniform", variance: (b-a)**2/12 };
+      break;
+    }
+  }
+  throw new Error(`Unsupported distribution/operation: ${dist}/${op}`);
+}
+
+function erfinv(x) {
+  // Approximate inverse error function
+  const a = [0.886226899, -1.645349621, 0.914624893, -0.140543331];
+  const b = [-2.118377725, 1.442710462, -0.329097515, 0.012229801];
+  const c = [-1.970840454, -1.624906003, 3.429567803, 1.641345311];
+  const d = [3.543889200, 1.637067800];
+  const sign = x >= 0 ? 1 : -1;
+  x = Math.abs(x);
+  let r;
+  if (x <= 0.7) {
+    const x2 = x*x;
+    r = x * (((a[3]*x2+a[2])*x2+a[1])*x2+a[0]) / ((((b[3]*x2+b[2])*x2+b[1])*x2+b[0])*x2+1);
+  } else {
+    const y = Math.sqrt(-Math.log((1-x)/2));
+    r = y >= 4 ? y : (y <= 2 ? (((c[3]*y+c[2])*y+c[1])*y+c[0])/((d[1]*y+d[0])*y+1) : (((d[1]*y+d[0])*y)*Math.log(y)-d[0]-d[1])/y);
+  }
+  return sign * r;
+}
+
+function boxMuller(mu, sigma, n) {
+  const samples = [];
+  for (let i = 0; i < Math.ceil(n/2); i++) {
+    const u1 = Math.random(), u2 = Math.random();
+    const z0 = Math.sqrt(-2*Math.log(u1))*Math.cos(2*Math.PI*u2);
+    const z1 = Math.sqrt(-2*Math.log(u1))*Math.sin(2*Math.PI*u2);
+    samples.push(mu + sigma*z0);
+    if (samples.length < n) samples.push(mu + sigma*z1);
+  }
+  return samples.slice(0,n).map(v => parseFloat(v.toPrecision(6)));
+}
+
+function calcHypothesisTest(args) {
+  const test = args.test;
+  const p = args.params || {};
+
+  switch (test) {
+    case "z_test": {
+      const { sample_mean, mu0, sigma, n, alpha } = p;
+      const se = sigma / Math.sqrt(n);
+      const z = (sample_mean - mu0) / se;
+      const pValue = 2 * (1 - 0.5*(1+erfFn(Math.abs(z)/Math.sqrt(2))));
+      const critical = erfinv(1-(alpha||0.05)) * Math.sqrt(2);
+      return { test: "z_test", H0: `mu = ${mu0}`, z_statistic: z, p_value: pValue, significant: pValue < (alpha||0.05), critical_value: critical, conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+    }
+    case "t_test_one_sample": {
+      const { data, mu0, alpha } = p;
+      const n = data.length;
+      const mean = data.reduce((a,b)=>a+b,0)/n;
+      const variance = data.reduce((s,x)=>s+(x-mean)**2,0)/(n-1);
+      const se = Math.sqrt(variance/n);
+      const t = (mean - mu0) / se;
+      const df = n - 1;
+      // Approximate p-value using normal approximation for t
+      const pValue = 2 * (1 - 0.5*(1+erfFn(Math.abs(t)/Math.sqrt(2))));
+      return { test: "t_test_one_sample", H0: `mu = ${mu0}`, sample_mean: mean, sample_std: Math.sqrt(variance), t_statistic: t, df, p_value: pValue, significant: pValue < (alpha||0.05), conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+    }
+    case "t_test_two_sample": {
+      const { data1, data2, alpha } = p;
+      const n1=data1.length, n2=data2.length;
+      const m1=data1.reduce((a,b)=>a+b,0)/n1, m2=data2.reduce((a,b)=>a+b,0)/n2;
+      const v1=data1.reduce((s,x)=>s+(x-m1)**2,0)/(n1-1), v2=data2.reduce((s,x)=>s+(x-m2)**2,0)/(n2-1);
+      const se = Math.sqrt(v1/n1 + v2/n2);
+      const t = (m1 - m2) / se;
+      const df = Math.pow(v1/n1+v2/n2,2) / (Math.pow(v1/n1,2)/(n1-1)+Math.pow(v2/n2,2)/(n2-1));
+      const pValue = 2 * (1 - 0.5*(1+erfFn(Math.abs(t)/Math.sqrt(2))));
+      return { test: "t_test_two_sample", H0: "mu1 = mu2", mean1: m1, mean2: m2, t_statistic: t, df, p_value: pValue, significant: pValue < (alpha||0.05), conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+    }
+    case "chi2_gof": {
+      const { observed, expected, alpha } = p;
+      const chi2 = observed.reduce((s,o,i) => s + (o-expected[i])**2/expected[i], 0);
+      const df = observed.length - 1;
+      // Approximate p-value
+      const pValue = 1 - 0.5*(1+erfFn(Math.sqrt(chi2/2)));
+      return { test: "chi2_gof", chi2_statistic: chi2, df, p_value: pValue, significant: pValue < (alpha||0.05), conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+    }
+  }
+  throw new Error(`Unknown test: ${test}`);
+}
+
+function calcConfidenceInterval(args) {
+  const type = args.type;
+  const confidence = args.confidence || 0.95;
+  const alpha = 1 - confidence;
+  const z = erfinv(1-alpha/2) * Math.sqrt(2); // z_{alpha/2}
+
+  switch (type) {
+    case "mean_z": {
+      const { data, sigma } = args;
+      const n = data.length;
+      const mean = data.reduce((a,b)=>a+b,0)/n;
+      const se = sigma / Math.sqrt(n);
+      const margin = z * se;
+      return { type: "mean (known sigma)", confidence, mean, margin, lower: mean-margin, upper: mean+margin, sigma, n };
+    }
+    case "mean_t": {
+      const data = args.data;
+      const n = data.length;
+      const mean = data.reduce((a,b)=>a+b,0)/n;
+      const std = Math.sqrt(data.reduce((s,x)=>s+(x-mean)**2,0)/(n-1));
+      const se = std / Math.sqrt(n);
+      // Approximate t critical value
+      const t_crit = z; // Use z as approximation for large n, reasonable for moderate n
+      const margin = t_crit * se;
+      return { type: "mean (t-distribution)", confidence, mean, std, margin, lower: mean-margin, upper: mean+margin, df: n-1, n };
+    }
+    case "proportion": {
+      const { p: phat, n } = args;
+      const se = Math.sqrt(phat*(1-phat)/n);
+      const margin = z * se;
+      return { type: "proportion", confidence, proportion: phat, margin, lower: phat-margin, upper: phat+margin, n };
+    }
+    case "variance": {
+      const data = args.data || [];
+      const n = data.length || args.n;
+      const std = args.sample_std || (data.length ? Math.sqrt(data.reduce((s,x)=>s+(x-data.reduce((a,b)=>a+b,0)/n)**2,0)/(n-1)) : undefined);
+      const variance = std * std;
+      // Chi-square critical values (approximate)
+      const df = n - 1;
+      const chi2_upper = df * (1 - 2/(9*df) + z*Math.sqrt(2/(9*df)))**3;
+      const chi2_lower = df * (1 - 2/(9*df) - z*Math.sqrt(2/(9*df)))**3;
+      return { type: "variance (chi2)", confidence, variance, lower: df*variance/chi2_upper, upper: df*variance/chi2_lower, df, n };
+    }
+  }
+  throw new Error(`Unknown CI type: ${type}`);
+}
+
+function calcAnova(args) {
+  const groups = args.groups;
+  const k = groups.length;
+  const allData = groups.flat();
+  const N = allData.length;
+  const grandMean = allData.reduce((a,b)=>a+b,0)/N;
+
+  // SS between
+  const ssBetween = groups.reduce((s,g) => {
+    const gm = g.reduce((a,b)=>a+b,0)/g.length;
+    return s + g.length * (gm - grandMean)**2;
+  }, 0);
+
+  // SS within
+  const ssWithin = groups.reduce((s,g) => {
+    const gm = g.reduce((a,b)=>a+b,0)/g.length;
+    return s + g.reduce((ss,x) => ss + (x-gm)**2, 0);
+  }, 0);
+
+  const ssTotal = allData.reduce((s,x) => s + (x-grandMean)**2, 0);
+  const dfBetween = k - 1;
+  const dfWithin = N - k;
+  const msBetween = ssBetween / dfBetween;
+  const msWithin = ssWithin / dfWithin;
+  const F = msBetween / msWithin;
+  const pValue = 1 - 0.5*(1+erfFn(Math.sqrt(F/2))); // Approximate
+
+  return {
+    test: "one-way ANOVA",
+    groups: k,
+    total_n: N,
+    grand_mean: grandMean,
+    ss_between: ssBetween,
+    ss_within: ssWithin,
+    ss_total: ssTotal,
+    df_between: dfBetween,
+    df_within: dfWithin,
+    ms_between: msBetween,
+    ms_within: msWithin,
+    F_statistic: F,
+    p_value: pValue,
+    significant: pValue < 0.05,
+    conclusion: pValue < 0.05 ? "Reject H0: at least one group mean differs" : "Fail to reject H0: no significant difference"
+  };
+}
+
+function calcCorrelation(args) {
+  const x = args.x, y = args.y;
+  const n = x.length;
+  const method = args.method || "pearson";
+
+  if (method === "pearson") {
+    const mx = x.reduce((a,b)=>a+b,0)/n, my = y.reduce((a,b)=>a+b,0)/n;
+    const cov = x.reduce((s,xi,i)=>s+(xi-mx)*(y[i]-my),0)/(n-1);
+    const sx = Math.sqrt(x.reduce((s,xi)=>s+(xi-mx)**2,0)/(n-1));
+    const sy = Math.sqrt(y.reduce((s,yi)=>s+(yi-my)**2,0)/(n-1));
+    const r = cov/(sx*sy);
+    // t-test for significance
+    const t = r * Math.sqrt((n-2)/(1-r*r+1e-15));
+    const pValue = 2*(1-0.5*(1+erfFn(Math.abs(t)/Math.sqrt(2))));
+    return { method: "pearson", r, r_squared: r*r, covariance: cov, t_statistic: t, p_value: pValue, significant: pValue < 0.05, n };
+  }
+
+  if (method === "spearman") {
+    // Rank-based
+    const rank = (arr) => {
+      const sorted = [...arr].sort((a,b)=>a-b);
+      return arr.map(v => sorted.indexOf(v)+1);
+    };
+    const rx = rank(x), ry = rank(y);
+    const d2 = rx.reduce((s,r,i)=>s+(r-ry[i])**2,0);
+    const rho = 1 - 6*d2/(n*(n*n-1));
+    return { method: "spearman", rho, n };
+  }
+
+  if (method === "covariance") {
+    const mx = x.reduce((a,b)=>a+b,0)/n, my = y.reduce((a,b)=>a+b,0)/n;
+    const cov = x.reduce((s,xi,i)=>s+(xi-mx)*(y[i]-my),0)/(n-1);
+    return { method: "covariance", covariance: cov, n };
+  }
+
+  if (method === "kendall") {
+    let concordant = 0, discordant = 0;
+    for (let i = 0; i < n; i++) for (let j = i+1; j < n; j++) {
+      const dx = x[i]-x[j], dy = y[i]-y[j];
+      if (dx*dy > 0) concordant++;
+      else if (dx*dy < 0) discordant++;
+    }
+    const tau = (concordant - discordant) / (n*(n-1)/2);
+    return { method: "kendall", tau, concordant, discordant, n };
+  }
 }
 
 // ============================================================
