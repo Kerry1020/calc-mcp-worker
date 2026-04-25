@@ -174,8 +174,8 @@ function parseExpr(exprOrTokens, pos = 0) {
     if (!t) throw new Error("Unexpected end of expression");
 
     // Unary minus/plus
-    if (t.type === 'op' && t.value === '-') { consume(); return { type: 'neg', arg: parsePrimary() }; }
-    if (t.type === 'op' && t.value === '+') { consume(); return parsePrimary(); }
+    if (t.type === 'op' && t.value === '-') { consume(); return { type: 'neg', arg: parseExpression(3) }; }
+    if (t.type === 'op' && t.value === '+') { consume(); return parseExpression(3); }
 
     // Number literal
     if (t.type === 'num') { consume(); return { type: 'num', value: t.value }; }
@@ -991,6 +991,7 @@ function calcMatrix(args) {
     return toolResult({ operation: op, result: formatNumber(matrixOp(op, A, B)) });
   }
   const result = matrixOp(op, A);
+  if (op === 'eigen') return toolResult({ operation: op, largest_eigenvalue: result.largest_eigenvalue, eigenvector: result.eigenvector.map(v => parseFloat(v.toPrecision(8))) });
   return toolResult({ operation: op, result: formatNumber(result) });
 }
 
