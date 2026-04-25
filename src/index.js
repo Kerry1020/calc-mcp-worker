@@ -23,7 +23,7 @@ const CONSTANTS = {
   hbar: 1.054571817e-34, // reduced Planck
   k: 1.380649e-23, // Boltzmann
   G: 6.67430e-11, // gravitational
-  g: 9.80665, // standard gravity
+  g0: 9.80665, // standard gravity
   eV: 1.602176634e-19, // electron volt
   e_charge: 1.602176634e-19, // elementary charge
   m_e: 9.1093837015e-31, // electron mass
@@ -50,6 +50,15 @@ const CONSTANTS = {
   lb: 0.45359237, kg: 1, oz: 0.028349523125,
   atm: 101325, bar: 1e5,
   hp: 745.7, cal: 4.184,
+  km: 1000, m: 1, cm: 0.01, mm: 0.001,
+  yard: 0.9144, nm: 1852, // nautical mile
+  ton: 1000, g: 0.001, mg: 0.000001,
+  liter: 0.001, mL: 0.000001, gallon: 0.003785411784,
+  mph: 0.44704, kph: 0.277778, knot: 0.514444,
+  Pa: 1, kPa: 1000, MPa: 1e6, psi: 6894.757293168,
+  J: 1, kJ: 1000, MJ: 1e6, Wh: 3600, kWh: 3.6e6, BTU: 1055.06,
+  W: 1, kW: 1000, MW: 1e6,
+  Hz: 1, kHz: 1000, MHz: 1e6, GHz: 1e9,
 };
 
 // ============================================================
@@ -92,9 +101,9 @@ function tokenize(expr) {
       continue;
     }
     // Identifiers (vars, functions, constants)
-    if (/[a-zA-Z_αβγδεζηθλμνξπρστφψω]/.test(expr[i])) {
+    if (/[a-zA-Z_]/.test(expr[i])) {
       let id = '';
-      while (i < expr.length && /[a-zA-Z_0-9αβγδεζηθλμνξπρστφψω]/.test(expr[i])) { id += expr[i]; i++; }
+      while (i < expr.length && /[a-zA-Z_0-9]/.test(expr[i])) { id += expr[i]; i++; }
       tokens.push({ type: 'id', value: id });
       continue;
     }
@@ -115,7 +124,17 @@ function tokenize(expr) {
 }
 
 // Pratt parser for expressions
-function parseExpr(tokens, pos = 0) {
+function resolveValue(id) {
+  if (id in CONSTANTS) return CONSTANTS[id];
+  if (id === 'i') return new Complex(0, 1);
+  if (id === 'inf' || id === 'infinity' || id === 'Inf') return Infinity;
+  if (id === 'nan' || id === 'NaN') return NaN;
+  return undefined;
+}
+
+function parseExpr(exprOrTokens, pos = 0) {
+  // Auto-tokenize if string input
+  const tokens = typeof exprOrTokens === 'string' ? tokenize(exprOrTokens) : exprOrTokens;
   let idx = pos;
   function peek() { return tokens[idx]; }
   function consume() { return tokens[idx++]; }
@@ -148,13 +167,7 @@ function parseExpr(tokens, pos = 0) {
     variance: arr => { const m=arr.reduce((a,b)=>a+b,0)/arr.length; return arr.reduce((s,x)=>s+(x-m)**2,0)/(arr.length-1); },
   };
 
-  function resolveValue(id) {
-    if (id in CONSTANTS) return CONSTANTS[id];
-    if (id === 'i') return new Complex(0, 1);
-    if (id === 'inf' || id === 'infinity' || id === 'Inf') return Infinity;
-    if (id === 'nan' || id === 'NaN') return NaN;
-    return undefined;
-  }
+
 
   function parsePrimary() {
     const t = peek();
@@ -178,17 +191,14 @@ function parseExpr(tokens, pos = 0) {
     // Matrix [a,b;c,d] or [a,b,c]
     if (t.type === 'lbracket') {
       consume();
-      const rows = [];
-      let currentRow = [];
+      const elements = [];
       while (peek() && peek().type !== 'rbracket') {
-        currentRow.push(parseExpression(0));
-        if (peek()?.type === 'semi') { consume(); rows.push(currentRow); currentRow = []; }
-        else if (peek()?.type === 'comma') { consume(); }
-        else if (peek()?.type !== 'rbracket') { rows.push(currentRow); currentRow = []; }
+        elements.push(parseExpression(0));
+        if (peek()?.type === 'comma') consume();
+        else if (peek()?.type === 'semi') consume();
       }
-      if (currentRow.length) rows.push(currentRow);
       if (peek()?.type === 'rbracket') consume();
-      return { type: 'matrix', rows };
+      return { type: 'array', elements };
     }
 
     // Function call or identifier
@@ -285,6 +295,7 @@ function evaluate(node, vars = {}) {
       return fn(...args);
     }
     case 'matrix': return node.rows.map(row => row.map(cell => evaluate(cell, vars)));
+    case 'array': return node.elements.map(e => evaluate(e, vars));
     default: throw new Error(`Unknown node type: ${node.type}`);
   }
 }
@@ -892,6 +903,7 @@ function calcBatch(args) {
 }
 
 function calcSingle(args) {
+    console.log('calcSingle input:', JSON.stringify(args));
   const precision = args.precision || 10;
   const vars = args.variables || {};
   const { ast } = parseExpr(args.expression);
