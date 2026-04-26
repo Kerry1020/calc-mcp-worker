@@ -1,18 +1,18 @@
 # calc-mcp-worker
 
-A high-performance math computation MCP server on Cloudflare Worker. **19 tools**, zero dependencies, no API keys.
+A high-performance math computation MCP server on Cloudflare Worker. **25 tools**, zero dependencies, no API keys.
 
 Supports batch evaluation (100+ expressions in one call), complex numbers, calculus, matrix operations, ODE solving, and more.
 
-## MCP Tools (19)
+## MCP Tools (25)
 
 ### ⚡ Core Computation
 
 | Tool | Description |
 |------|-------------|
 | `calc_batch` | **Batch evaluate up to 100 expressions in parallel.** Returns all results at once. |
-| `calc_single` | Evaluate a single expression. Supports arithmetic, trig, log, constants, complex numbers. |
-| `calc_simplify` | Algebraic simplification with variable substitution. |
+| `calc_single` | Evaluate a single expression. Supports arithmetic, trig, base-10 `log`, natural-log `ln`, constants, complex numbers, and postfix `!` factorial. |
+| `calc_simplify` | Numeric simplification/evaluation with substitutions. Not a symbolic CAS. |
 
 ### 📐 Calculus
 
@@ -22,7 +22,7 @@ Supports batch evaluation (100+ expressions in one call), complex numbers, calcu
 | `calc_integral` | Definite integral ∫f(x)dx. Simpson's rule with 10000 subdivisions. |
 | `calc_double_integral` | Double integral ∬f(x,y)dxdy over rectangular region. |
 | `calc_taylor` | Taylor series expansion to given order. |
-| `calc_limit` | Numerical limit as x approaches a value (left/right/both). |
+| `calc_limit` | Numerical limit classification by multi-point sampling as x approaches a value (left/right/both). |
 
 ### 🔢 Equation Solving
 
@@ -41,7 +41,7 @@ Supports batch evaluation (100+ expressions in one call), complex numbers, calcu
 
 | Tool | Description |
 |------|-------------|
-| `calc_matrix` | Matrix ops: det, inv, transpose, trace, eigen, add, sub, mul. Input: `[[1,2],[3,4]]`. |
+| `calc_matrix` | Matrix ops: det, inv, transpose, trace, eigen, add, sub, mul. Singular inverses return an error instead of `Infinity`. Input: `[[1,2],[3,4]]`. |
 
 ### 📈 Statistics
 
@@ -80,6 +80,9 @@ x^3 - 2*x - 5     → (with variables)
 sin(pi/6)          → 0.5
 sqrt(2)            → 1.414213562
 factorial(10)      → 3628800
+5!/(3!*2!)         → 10
+ln(e)              → 1
+log(e)             → 0.4342944819   # base-10 log
 gamma(5)           → 24
 erf(1)             → 0.8427007929
 
@@ -104,7 +107,7 @@ Na                 → 6.022e23  (Avogadro)
 
 **Trig**: sin, cos, tan, sec, csc, cot, asin, acos, atan, atan2, sinh, cosh, tanh, asinh, acosh, atanh
 
-**Math**: sqrt, cbrt, abs, ln, log, log2, log10, exp, ceil, floor, round, sign, pow, mod
+**Math**: sqrt, cbrt, abs, `ln` (natural log), `log`/`log10` (base-10), log2, exp, ceil, floor, round, sign, pow, mod
 
 **Special**: factorial, gamma, erf, binom (binomial coefficient), gcd, lcm
 
@@ -145,6 +148,14 @@ Na                 → 6.022e23  (Avogadro)
 ```
 
 Returns all 8 results in one response.
+
+## Behavior Notes
+
+- `!` postfix factorial is supported and only accepts non-negative integers.
+- `ln(x)` is natural log; `log(x)` and `log10(x)` are base-10.
+- `calc_simplify` is evaluate-only unless substitutions make the expression fully numeric.
+- `calc_probability` and `calc_hypothesis_test` require distribution/test-specific params and now fail explicitly when required inputs are missing.
+- `calc_limit` is still numerical, but it now reports directional classifications and can mark divergent one-sided limits as `Infinity`/`-Infinity`.
 
 ## Local Development
 

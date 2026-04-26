@@ -3,6 +3,8 @@
 
 const SERVER_NAME = "calc-mcp-worker";
 const SERVER_VERSION = "1.0.0";
+const NUMERIC_EPSILON = 1e-12;
+const MATRIX_EPSILON = 1e-12;
 
 // ============================================================
 // CONSTANTS — physics, math, chemistry, astronomy
@@ -85,6 +87,58 @@ class Complex {
   toString() { if (Math.abs(this.im)<1e-15) return `${this.re}`; if (Math.abs(this.re)<1e-15) return `${this.im}i`; return `${this.re}${this.im>=0?'+':''}${this.im}i`; }
 }
 
+function factorialNumber(n) {
+  if (!Number.isFinite(n)) throw new Error("Factorial requires a finite number");
+  if (n < 0 || Math.trunc(n) !== n) throw new Error("Factorial requires a non-negative integer");
+  let r = 1;
+  for (let i = 2; i <= n; i++) r *= i;
+  return r;
+}
+
+function requireField(obj, field, context) {
+  if (obj[field] === undefined || obj[field] === null) throw new Error(`${context} requires ${field}`);
+  return obj[field];
+}
+
+function requireArrayField(obj, field, context, minLength = 1) {
+  const value = requireField(obj, field, context);
+  if (!Array.isArray(value) || value.length < minLength) throw new Error(`${context} requires ${field} as an array with at least ${minLength} value${minLength === 1 ? '' : 's'}`);
+  return value;
+}
+
+function requirePositiveInteger(value, label) {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer`);
+  return value;
+}
+
+function assertFiniteNumber(value, context) {
+  if (typeof value !== 'number' || Number.isNaN(value)) throw new Error(`${context} produced NaN`);
+  if (!Number.isFinite(value)) throw new Error(`${context} produced a non-finite result`);
+  return value;
+}
+
+function assertFiniteComputation(value, context) {
+  if (value instanceof Complex) {
+    assertFiniteNumber(value.re, `${context} real part`);
+    assertFiniteNumber(value.im, `${context} imaginary part`);
+    return value;
+  }
+  return assertFiniteNumber(value, context);
+}
+
+function evaluateExpr(expr, vars = {}) {
+  const { ast } = parseExpr(expr);
+  return evaluate(ast, vars);
+}
+
+function safeNullableEval(expr, vars) {
+  try {
+    return evaluateExpr(expr, vars);
+  } catch {
+    return NaN;
+  }
+}
+
 // ============================================================
 // TOKENIZER + PARSER (handles complex, functions, matrices)
 // ============================================================
@@ -108,7 +162,7 @@ function tokenize(expr) {
       continue;
     }
     // Operators and parens
-    if ('+-*/^%'.includes(expr[i])) { tokens.push({ type: 'op', value: expr[i] }); i++; continue; }
+    if ('+-*/^%!'.includes(expr[i])) { tokens.push({ type: 'op', value: expr[i] }); i++; continue; }
     if (expr[i] === '(') { tokens.push({ type: 'lparen' }); i++; continue; }
     if (expr[i] === ')') { tokens.push({ type: 'rparen' }); i++; continue; }
     if (expr[i] === '[') { tokens.push({ type: 'lbracket' }); i++; continue; }
@@ -149,7 +203,7 @@ function parseExpr(exprOrTokens, pos = 0) {
     exp: Math.exp, pow: Math.pow,
     ceil: Math.ceil, floor: Math.floor, round: Math.round,
     sign: Math.sign, max: Math.max, min: Math.min,
-    factorial: n => { let r=1; for(let i=2;i<=n;i++)r*=i; return r; },
+    factorial: factorialNumber,
     gamma: gammaFn, erf: erfFn,
     sec: x => 1/Math.cos(x), csc: x => 1/Math.sin(x), cot: x => 1/Math.tan(x),
     rad: x => x*Math.PI/180, deg: x => x*180/Math.PI,
@@ -230,6 +284,15 @@ function parseExpr(exprOrTokens, pos = 0) {
     throw new Error(`Unexpected token: ${JSON.stringify(t)}`);
   }
 
+  function parsePostfix() {
+    let node = parsePrimary();
+    while (peek()?.type === 'op' && peek().value === '!') {
+      consume();
+      node = { type: 'postfix', op: '!', arg: node };
+    }
+    return node;
+  }
+
   function getOpPrec(op) {
     if (op === '+' || op === '-') return { prec: 1, assoc: 'left' };
     if (op === '*' || op === '/' || op === '%') return { prec: 2, assoc: 'left' };
@@ -238,17 +301,16 @@ function parseExpr(exprOrTokens, pos = 0) {
   }
 
   function parseExpression(minPrec) {
-    let left = parsePrimary();
+    let left = parsePostfix();
     // Implicit multiplication: 2pi, 3i, 2(3+4)
     while (peek()) {
       const t = peek();
-      // Implicit mul: num followed by id/lparen
-      if ((t.type === 'id' || t.type === 'lparen' || t.type === 'num') && left.type !== 'op') {
-        const right = parsePrimary();
+      if ((t.type === 'id' || t.type === 'lparen' || t.type === 'num' || t.type === 'lbracket' || t.type === 'abs_open') && left.type !== 'op') {
+        const right = parsePostfix();
         left = { type: 'binop', op: '*', left, right };
         continue;
       }
-      if (t.type !== 'op') break;
+      if (t.type !== 'op' || t.value === '!') break;
       const { prec, assoc } = getOpPrec(t.value);
       if (prec < minPrec) break;
       consume();
@@ -276,6 +338,11 @@ function evaluate(node, vars = {}) {
     }
     case 'neg': return -1 * evaluate(node.arg, vars);
     case 'abs': { const v = evaluate(node.arg, vars); return v instanceof Complex ? v.abs() : Math.abs(v); }
+    case 'postfix': {
+      const v = evaluate(node.arg, vars);
+      if (node.op === '!') return factorialNumber(v);
+      throw new Error(`Unknown postfix operator: ${node.op}`);
+    }
     case 'binop': {
       const l = evaluate(node.left, vars);
       const r = evaluate(node.right, vars);
@@ -368,25 +435,40 @@ function binomialFn(n, k) { if(k<0||k>n)return 0; if(k===0||k===n)return 1; k=Ma
 // ============================================================
 // NUMERICAL METHODS
 // ============================================================
+function ensureStableNumericEstimate(samples, context) {
+  const finite = samples.map(value => assertFiniteNumber(value, context));
+  const magnitudes = finite.map(v => Math.abs(v));
+  const explosive = magnitudes.length >= 2 && magnitudes.every((m, i, arr) => i === 0 || m >= arr[i - 1] * 100);
+  if (explosive) throw new Error(`${context} is unstable near the evaluation point`);
+
+  const tail = finite.slice(-2);
+  const spread = Math.abs(tail[0] - tail[1]);
+  const scale = Math.max(1, ...tail.map(v => Math.abs(v)));
+  if (spread > scale * 1e-3) throw new Error(`${context} is unstable near the evaluation point`);
+  return tail.reduce((a, b) => a + b, 0) / tail.length;
+}
+
 function numericalDerivative(expr, x, vars = {}, h = 1e-8) {
-  const v1 = safeEval(expr, { ...vars, x: x + h });
-  const v2 = safeEval(expr, { ...vars, x: x - h });
-  return (v1 - v2) / (2 * h);
+  const steps = [h * 10000, h * 100, h];
+  const samples = steps.map(step => {
+    const v1 = assertFiniteNumber(safeNullableEval(expr, { ...vars, x: x + step }), "Derivative sample");
+    const v2 = assertFiniteNumber(safeNullableEval(expr, { ...vars, x: x - step }), "Derivative sample");
+    return (v1 - v2) / (2 * step);
+  });
+  return assertFiniteNumber(ensureStableNumericEstimate(samples, "Derivative"), "Derivative");
 }
 
 function numericalIntegral(expr, a, b, vars = {}, n = 10000) {
-  // Simpson's rule
   const h = (b - a) / n;
-  let sum = safeEval(expr, { ...vars, x: a }) + safeEval(expr, { ...vars, x: b });
+  let sum = assertFiniteNumber(safeNullableEval(expr, { ...vars, x: a }), "Integral endpoint") + assertFiniteNumber(safeNullableEval(expr, { ...vars, x: b }), "Integral endpoint");
   for (let i = 1; i < n; i++) {
     const xi = a + i * h;
-    sum += (i % 2 === 0 ? 2 : 4) * safeEval(expr, { ...vars, x: xi });
+    sum += (i % 2 === 0 ? 2 : 4) * assertFiniteNumber(safeNullableEval(expr, { ...vars, x: xi }), "Integral sample");
   }
-  return sum * h / 3;
+  return assertFiniteNumber(sum * h / 3, "Integral");
 }
 
 function numericalIntegral2D(expr, xa, xb, ya, yb, vars = {}, n = 50) {
-  // Double integral via repeated Simpson
   const hx = (xb - xa) / n;
   let total = 0;
   for (let i = 0; i <= n; i++) {
@@ -397,21 +479,21 @@ function numericalIntegral2D(expr, xa, xb, ya, yb, vars = {}, n = 50) {
     for (let j = 0; j <= n; j++) {
       const yj = ya + j * hy;
       const cy = (j === 0 || j === n) ? 1 : (j % 2 === 0 ? 2 : 4);
-      innerSum += cy * safeEval(expr, { ...vars, x: xi, y: yj });
+      innerSum += cy * assertFiniteNumber(safeNullableEval(expr, { ...vars, x: xi, y: yj }), "Double integral sample");
     }
     total += cx * innerSum * hy / 3;
   }
-  return total * hx / 3;
+  return assertFiniteNumber(total * hx / 3, "Double integral");
 }
 
 function newtonMethod(expr, x0, vars = {}, tol = 1e-12, maxIter = 100) {
   let x = x0;
   const iterations = [];
   for (let i = 0; i < maxIter; i++) {
-    const fx = safeEval(expr, { ...vars, x });
+    const fx = assertFiniteNumber(safeNullableEval(expr, { ...vars, x }), "Newton function value");
     const fpx = numericalDerivative(expr, x, vars);
     if (Math.abs(fpx) < 1e-15) return { root: null, iterations, converged: false, error: "Zero derivative" };
-    const xNew = x - fx / fpx;
+    const xNew = assertFiniteNumber(x - fx / fpx, "Newton iterate");
     iterations.push({ i: i + 1, x, fx, fpx, dx: xNew - x });
     if (Math.abs(xNew - x) < tol) return { root: xNew, iterations, converged: true, iterations_count: i + 1 };
     x = xNew;
@@ -420,12 +502,12 @@ function newtonMethod(expr, x0, vars = {}, tol = 1e-12, maxIter = 100) {
 }
 
 function bisectionMethod(expr, a, b, vars = {}, tol = 1e-12, maxIter = 100) {
-  let fa = safeEval(expr, { ...vars, x: a });
-  let fb = safeEval(expr, { ...vars, x: b });
+  let fa = assertFiniteNumber(safeNullableEval(expr, { ...vars, x: a }), "Bisection endpoint");
+  let fb = assertFiniteNumber(safeNullableEval(expr, { ...vars, x: b }), "Bisection endpoint");
   if (fa * fb > 0) return { root: null, converged: false, error: "f(a) and f(b) have same sign" };
   for (let i = 0; i < maxIter; i++) {
     const c = (a + b) / 2;
-    const fc = safeEval(expr, { ...vars, x: c });
+    const fc = assertFiniteNumber(safeNullableEval(expr, { ...vars, x: c }), "Bisection sample");
     if (Math.abs(fc) < tol || (b - a) / 2 < tol) return { root: c, converged: true, iterations_count: i + 1 };
     if (fa * fc < 0) { b = c; fb = fc; } else { a = c; fa = fc; }
   }
@@ -436,26 +518,67 @@ function seriesSum(expr, nStart, nEnd, varName = 'n', vars = {}) {
   let sum = 0;
   const terms = [];
   for (let n = nStart; n <= nEnd; n++) {
-    const val = safeEval(expr, { ...vars, [varName]: n });
+    const val = safeNullableEval(expr, { ...vars, [varName]: n });
     sum += val;
     if (n - nStart < 20) terms.push({ n, value: val, partial_sum: sum });
   }
   return { sum, nStart, nEnd, terms, term_count: nEnd - nStart + 1 };
 }
 
+function classifyDirectionalLimit(samples) {
+  const finite = samples.filter(v => typeof v === 'number' && Number.isFinite(v));
+  if (!finite.length) return { classification: 'undefined' };
+
+  const allPositive = finite.every(v => v > 0);
+  const allNegative = finite.every(v => v < 0);
+  const magnitudes = finite.map(v => Math.abs(v));
+  const growingFast = magnitudes.length >= 2 && magnitudes.every((m, i, arr) => i === 0 || m >= arr[i - 1] * 5);
+  if (growingFast && allPositive) return { classification: 'infinite', value: Infinity };
+  if (growingFast && allNegative) return { classification: 'infinite', value: -Infinity };
+
+  const tail = finite.slice(-3);
+  const spread = Math.max(...tail) - Math.min(...tail);
+  const scale = Math.max(1, ...tail.map(v => Math.abs(v)));
+  if (spread <= scale * 1e-6) {
+    return { classification: 'finite', value: tail.reduce((a, b) => a + b, 0) / tail.length };
+  }
+
+  return { classification: 'unstable', samples: finite };
+}
+
 function limitExpr(expr, approach, fromDir = 'both', vars = {}) {
-  const h = 1e-10;
-  const vals = {};
+  const steps = [1e-3, 1e-5, 1e-7, 1e-9];
+  const result = { approach, direction: fromDir, method: 'multi-point numerical sampling' };
+
   if (fromDir === 'left' || fromDir === 'both') {
-    vals.from_left = safeEval(expr, { ...vars, x: approach - h });
+    const samples = steps.map(h => safeNullableEval(expr, { ...vars, x: approach - h }));
+    const classification = classifyDirectionalLimit(samples);
+    result.from_left = classification.value !== undefined ? classification.value : null;
+    result.from_left_samples = samples;
+    result.from_left_classification = classification.classification;
   }
+
   if (fromDir === 'right' || fromDir === 'both') {
-    vals.from_right = safeEval(expr, { ...vars, x: approach + h });
+    const samples = steps.map(h => safeNullableEval(expr, { ...vars, x: approach + h }));
+    const classification = classifyDirectionalLimit(samples);
+    result.from_right = classification.value !== undefined ? classification.value : null;
+    result.from_right_samples = samples;
+    result.from_right_classification = classification.classification;
   }
-  if (fromDir === 'both' && Math.abs(vals.from_left - vals.from_right) < 1e-6) {
-    vals.limit = (vals.from_left + vals.from_right) / 2;
+
+  if (fromDir === 'both') {
+    if (result.from_left_classification === 'finite' && result.from_right_classification === 'finite') {
+      const left = result.from_left;
+      const right = result.from_right;
+      if (Math.abs(left - right) <= Math.max(1, Math.abs(left), Math.abs(right)) * 1e-6) {
+        result.limit = (left + right) / 2;
+      }
+    } else if (result.from_left_classification === 'infinite' && result.from_right_classification === 'infinite' && result.from_left === result.from_right) {
+      result.limit = result.from_left;
+    }
   }
-  return vals;
+
+  return result;
 }
 
 function taylorSeries(expr, x0, order, vars = {}) {
@@ -477,7 +600,7 @@ function taylorSeries(expr, x0, order, vars = {}) {
 }
 
 function nthDerivative(expr, x0, n, vars = {}, h = 1e-4) {
-  if (n === 0) return safeEval(expr, { ...vars, x: x0 });
+  if (n === 0) return safeNullableEval(expr, { ...vars, x: x0 });
   // Use finite difference coefficients
   if (n === 1) return numericalDerivative(expr, x0, vars, h);
   // Recursive: d^n/dx^n f(x) ≈ (f^(n-1)(x+h) - f^(n-1)(x-h)) / (2h)
@@ -490,7 +613,7 @@ function eulerMethod(dydx, x0, y0, xEnd, steps, vars = {}) {
   const points = [{ x: x0, y: y0 }];
   let x = x0, y = y0;
   for (let i = 0; i < steps; i++) {
-    const slope = safeEval(dydx, { ...vars, x, y });
+    const slope = safeNullableEval(dydx, { ...vars, x, y });
     y = y + h * slope;
     x = x0 + (i + 1) * h;
     points.push({ x, y });
@@ -503,10 +626,10 @@ function rungeKutta4(dydx, x0, y0, xEnd, steps, vars = {}) {
   const points = [{ x: x0, y: y0 }];
   let x = x0, y = y0;
   for (let i = 0; i < steps; i++) {
-    const k1 = safeEval(dydx, { ...vars, x, y });
-    const k2 = safeEval(dydx, { ...vars, x: x+h/2, y: y+h*k1/2 });
-    const k3 = safeEval(dydx, { ...vars, x: x+h/2, y: y+h*k2/2 });
-    const k4 = safeEval(dydx, { ...vars, x: x+h, y: y+h*k3 });
+    const k1 = safeNullableEval(dydx, { ...vars, x, y });
+    const k2 = safeNullableEval(dydx, { ...vars, x: x+h/2, y: y+h*k1/2 });
+    const k3 = safeNullableEval(dydx, { ...vars, x: x+h/2, y: y+h*k2/2 });
+    const k4 = safeNullableEval(dydx, { ...vars, x: x+h, y: y+h*k3 });
     y = y + h*(k1 + 2*k2 + 2*k3 + k4)/6;
     x = x0 + (i+1)*h;
     points.push({ x, y });
@@ -514,14 +637,12 @@ function rungeKutta4(dydx, x0, y0, xEnd, steps, vars = {}) {
   return { method: "rk4", x0, y0, xEnd, steps, h, points };
 }
 
-function safeEval(expr, vars) {
-  try {
-    const { ast } = parseExpr(expr);
-    return evaluate(ast, vars);
-  } catch { return NaN; }
+function parseMatrixExpression(expr) {
+  const value = evaluateExpr(expr, {});
+  if (!Array.isArray(value) || !Array.isArray(value[0])) throw new Error("Input must be a matrix [[a,b],[c,d]]");
+  return value;
 }
 
-// Matrix operations
 function matrixOp(op, ...matrices) {
   const A = matrices[0], B = matrices[1];
   switch (op) {
@@ -562,6 +683,7 @@ function matrixInv(m) {
     for (let k = i+1; k < n; k++) if (Math.abs(aug[k][i]) > Math.abs(aug[maxRow][i])) maxRow = k;
     [aug[i], aug[maxRow]] = [aug[maxRow], aug[i]];
     const pivot = aug[i][i];
+    if (!Number.isFinite(pivot) || Math.abs(pivot) < MATRIX_EPSILON) throw new Error("Matrix is singular and cannot be inverted");
     for (let j = 0; j < 2*n; j++) aug[i][j] /= pivot;
     for (let k = 0; k < n; k++) {
       if (k === i) continue;
@@ -750,12 +872,12 @@ const TOOLS = [
   },
   {
     name: "calc_simplify",
-    description: "Algebraic simplification: expand, factor basic forms, rationalize. Limited symbolic CAS.",
+    description: "Numeric simplification/evaluation with substitutions. Not a symbolic CAS.",
     inputSchema: {
       type: "object",
       properties: {
         expression: { type: "string", description: "Expression to simplify" },
-        operation: { type: "string", enum: ["expand", "evaluate", "substitute"], description: "Simplification type, default evaluate" },
+        operation: { type: "string", enum: ["evaluate", "expand", "substitute"], description: "Default evaluate. expand/substitute return an unsupported-operation error for free-symbol algebra." },
         substitutions: { type: "object", description: "Variable substitutions" }
       },
       required: ["expression"]
@@ -984,8 +1106,7 @@ function calcBatch(args) {
   const vars = args.variables || {};
   const results = exprs.map(expr => {
     try {
-      const { ast } = parseExpr(expr);
-      const val = evaluate(ast, vars);
+      const val = assertFiniteComputation(evaluateExpr(expr, vars), `Expression ${expr}`);
       return { expression: expr, result: formatNumber(val, precision), error: null };
     } catch (e) {
       return { expression: expr, result: null, error: e.message };
@@ -995,18 +1116,20 @@ function calcBatch(args) {
 }
 
 function calcSingle(args) {
-    console.log('calcSingle input:', JSON.stringify(args));
   const precision = args.precision || 10;
   const vars = args.variables || {};
-  const { ast } = parseExpr(args.expression);
-  const val = evaluate(ast, vars);
+  const val = assertFiniteComputation(evaluateExpr(args.expression, vars), `Expression ${args.expression}`);
   return toolResult({ expression: args.expression, result: formatNumber(val, precision), type: typeof val === 'object' && val instanceof Complex ? 'complex' : typeof val });
 }
 
 function calcDerivative(args) {
   const vars = args.variables || {};
-  const result = numericalDerivative(args.expression, args.point, vars);
-  return toolResult({ expression: `d/dx [${args.expression}]`, at: `x = ${args.point}`, derivative: formatNumber(result) });
+  try {
+    const result = numericalDerivative(args.expression, args.point, vars);
+    return toolResult({ expression: `d/dx [${args.expression}]`, at: `x = ${args.point}`, derivative: formatNumber(result) });
+  } catch (e) {
+    return toolResult({ expression: `d/dx [${args.expression}]`, at: `x = ${args.point}`, error: e.message });
+  }
 }
 
 function calcIntegral(args) {
@@ -1026,12 +1149,16 @@ function calcSolve(args) {
   const vars = args.variables || {};
   const method = args.method || "newton";
   let result;
-  if (method === "bisection") {
-    if (args.a === undefined || args.b === undefined) throw new Error("Bisection requires a and b bounds");
-    result = bisectionMethod(args.expression, args.a, args.b, vars, args.tol);
-  } else {
-    const x0 = args.initial_guess !== undefined ? args.initial_guess : 1;
-    result = newtonMethod(args.expression, x0, vars, args.tol, args.max_iter);
+  try {
+    if (method === "bisection") {
+      if (args.a === undefined || args.b === undefined) throw new Error("Bisection requires a and b bounds");
+      result = bisectionMethod(args.expression, args.a, args.b, vars, args.tol);
+    } else {
+      const x0 = args.initial_guess !== undefined ? args.initial_guess : 1;
+      result = newtonMethod(args.expression, x0, vars, args.tol, args.max_iter);
+    }
+  } catch (e) {
+    result = { root: null, converged: false, error: e.message };
   }
   return toolResult({ expression: `${args.expression} = 0`, method, ...result });
 }
@@ -1045,6 +1172,9 @@ function calcSeries(args) {
 
 function calcLimit(args) {
   const result = limitExpr(args.expression, args.approach, args.direction || "both");
+  if (result.from_left !== undefined && result.from_left !== null) result.from_left = formatNumber(result.from_left);
+  if (result.from_right !== undefined && result.from_right !== null) result.from_right = formatNumber(result.from_right);
+  if (result.limit !== undefined && result.limit !== null) result.limit = formatNumber(result.limit);
   return toolResult({ expression: `lim(x→${args.approach}) ${args.expression}`, ...result });
 }
 
@@ -1064,7 +1194,10 @@ function calcOde(args) {
   } else {
     result = rungeKutta4(args.expression, args.x0, args.y0, args.x_end, steps);
   }
-  // Only return every Nth point to keep response manageable
+  result.points.forEach(point => {
+    assertFiniteNumber(point.x, "ODE x");
+    assertFiniteNumber(point.y, "ODE y");
+  });
   const stride = Math.max(1, Math.floor(result.points.length / 50));
   result.points = result.points.filter((_, i) => i % stride === 0 || i === result.points.length - 1);
   return toolResult({ expression: `dy/dx = ${args.expression}`, ...result });
@@ -1072,14 +1205,10 @@ function calcOde(args) {
 
 function calcMatrix(args) {
   const op = args.operation;
-  // Parse matrix from expression
-  const { ast: astA } = parseExpr(args.matrix);
-  const A = evaluate(astA, {});
-  if (!Array.isArray(A) || !Array.isArray(A[0])) throw new Error("Input must be a matrix [[a,b],[c,d]]");
+  const A = parseMatrixExpression(args.matrix);
   if (['add','sub','mul'].includes(op)) {
     if (!args.matrix_b) throw new Error(`Operation ${op} requires matrix_b`);
-    const { ast: astB } = parseExpr(args.matrix_b);
-    const B = evaluate(astB, {});
+    const B = parseMatrixExpression(args.matrix_b);
     return toolResult({ operation: op, result: formatNumber(matrixOp(op, A, B)) });
   }
   const result = matrixOp(op, A);
@@ -1089,12 +1218,19 @@ function calcMatrix(args) {
 
 function calcSimplify(args) {
   const vars = args.substitutions || {};
+  const operation = args.operation || "evaluate";
+  const hasFreeSymbol = /[a-zA-Z_][a-zA-Z0-9_]*/.test(args.expression) && Object.keys(vars).length === 0;
+  if (operation !== "evaluate") {
+    return toolResult({ expression: args.expression, operation, error: `Operation ${operation} is not supported without a symbolic algebra engine` });
+  }
+  if (hasFreeSymbol) {
+    return toolResult({ expression: args.expression, operation, error: "Free-symbol simplification is not supported; provide substitutions or use evaluate-only inputs" });
+  }
   try {
-    const { ast } = parseExpr(args.expression);
-    const val = evaluate(ast, vars);
-    return toolResult({ expression: args.expression, simplified: formatNumber(val), substitutions: vars });
+    const val = evaluateExpr(args.expression, vars);
+    return toolResult({ expression: args.expression, operation, simplified: formatNumber(val), substitutions: vars });
   } catch (e) {
-    return toolResult({ expression: args.expression, error: e.message });
+    return toolResult({ expression: args.expression, operation, error: e.message });
   }
 }
 
@@ -1223,7 +1359,7 @@ function calcPlotData(args) {
   for (let i = 0; i < nPoints; i++) {
     const x = args.x_min + i * dx;
     try {
-      const y = safeEval(args.expression, { ...vars, x });
+      const y = safeNullableEval(args.expression, { ...vars, x });
       xVals.push(parseFloat(x.toPrecision(6)));
       yVals.push(typeof y === 'number' && isFinite(y) ? parseFloat(y.toPrecision(8)) : null);
     } catch {
@@ -1293,6 +1429,7 @@ function solveLinearSystem(A, b) {
     for (let k = i+1; k < n; k++) if (Math.abs(aug[k][i]) > Math.abs(aug[maxRow][i])) maxRow = k;
     [aug[i], aug[maxRow]] = [aug[maxRow], aug[i]];
     const pivot = aug[i][i];
+    if (!Number.isFinite(pivot) || Math.abs(pivot) < MATRIX_EPSILON) throw new Error("Linear system is singular or ill-conditioned");
     for (let j = i; j <= n; j++) aug[i][j] /= pivot;
     for (let k = 0; k < n; k++) {
       if (k === i) continue;
@@ -1310,75 +1447,142 @@ function calcProbability(args) {
 
   switch (dist) {
     case "normal": {
-      const mu = p.mean || 0, sigma = p.std || 1;
+      const mu = p.mean ?? 0;
+      const sigma = p.std ?? 1;
+      if (!(sigma > 0)) throw new Error("normal distribution requires std > 0");
       const pdf = (x) => Math.exp(-0.5*((x-mu)/sigma)**2) / (sigma*Math.sqrt(2*Math.PI));
       const cdf = (x) => 0.5 * (1 + erfFn((x-mu)/(sigma*Math.sqrt(2))));
-      const quantile = (q) => mu + sigma * Math.sqrt(2) * erfinv(2*q-1);
-      if (op === "pdf") return { distribution: "normal", params: {mean:mu,std:sigma}, x: p.x, pdf: pdf(p.x) };
-      if (op === "cdf") return { distribution: "normal", params: {mean:mu,std:sigma}, x: p.x, cdf: cdf(p.x) };
-      if (op === "quantile") return { distribution: "normal", params: {mean:mu,std:sigma}, p: p.p, quantile: quantile(p.p) };
+      const quantile = (q) => {
+        if (!(q > 0 && q < 1)) throw new Error("normal quantile requires 0 < p < 1");
+        return mu + sigma * Math.sqrt(2) * erfinv(2*q-1);
+      };
+      if (op === "pdf") {
+        const x = requireField(p, "x", "normal pdf");
+        return { distribution: "normal", params: {mean:mu,std:sigma}, x, pdf: pdf(x) };
+      }
+      if (op === "cdf") {
+        const x = requireField(p, "x", "normal cdf");
+        return { distribution: "normal", params: {mean:mu,std:sigma}, x, cdf: cdf(x) };
+      }
+      if (op === "quantile") {
+        const q = requireField(p, "p", "normal quantile");
+        return { distribution: "normal", params: {mean:mu,std:sigma}, p: q, quantile: quantile(q) };
+      }
       if (op === "mean") return { distribution: "normal", mean: mu };
       if (op === "variance") return { distribution: "normal", variance: sigma*sigma };
-      if (op === "sample") return { distribution: "normal", sample: boxMuller(mu, sigma, p.n||10) };
+      if (op === "sample") {
+        const n = requirePositiveInteger(p.n ?? 10, "normal sample n");
+        return { distribution: "normal", sample: boxMuller(mu, sigma, n) };
+      }
       break;
     }
     case "binomial": {
-      const n = p.n || 10, prob = p.p || 0.5;
-      const binomCoeff = (n,k) => { let r=1; for(let i=0;i<k;i++)r=r*(n-i)/(i+1); return Math.round(r); };
-      const pmf = (k) => binomCoeff(n,k) * Math.pow(prob,k) * Math.pow(1-prob,n-k);
+      const n = requirePositiveInteger(p.n ?? 10, "binomial n");
+      const prob = p.p ?? 0.5;
+      if (!(prob >= 0 && prob <= 1)) throw new Error("binomial requires 0 <= p <= 1");
+      const pmf = (k) => binomialFn(n, k) * Math.pow(prob,k) * Math.pow(1-prob,n-k);
       const cdfVal = (k) => { let s=0; for(let i=0;i<=k;i++) s+=pmf(i); return s; };
-      if (op === "pdf") return { distribution: "binomial", params: {n,p:prob}, k: p.k, pdf: pmf(p.k) };
-      if (op === "cdf") return { distribution: "binomial", params: {n,p:prob}, k: p.k, cdf: cdfVal(p.k) };
+      if (op === "pdf") {
+        const k = requireField(p, "k", "binomial pdf");
+        return { distribution: "binomial", params: {n,p:prob}, k, pdf: pmf(k) };
+      }
+      if (op === "cdf") {
+        const k = requireField(p, "k", "binomial cdf");
+        return { distribution: "binomial", params: {n,p:prob}, k, cdf: cdfVal(k) };
+      }
       if (op === "mean") return { distribution: "binomial", mean: n*prob };
       if (op === "variance") return { distribution: "binomial", variance: n*prob*(1-prob) };
       break;
     }
     case "poisson": {
-      const lambda = p.lambda || 1;
+      const lambda = p.lambda ?? 1;
+      if (!(lambda > 0)) throw new Error("poisson requires lambda > 0");
       const pmf = (k) => Math.exp(-lambda) * Math.pow(lambda,k) / gammaFn(k+1);
       const cdfVal = (k) => { let s=0; for(let i=0;i<=k;i++) s+=pmf(i); return s; };
-      if (op === "pdf") return { distribution: "poisson", params: {lambda}, k: p.k, pdf: pmf(p.k) };
-      if (op === "cdf") return { distribution: "poisson", params: {lambda}, k: p.k, cdf: cdfVal(p.k) };
+      if (op === "pdf") {
+        const k = requireField(p, "k", "poisson pdf");
+        return { distribution: "poisson", params: {lambda}, k, pdf: pmf(k) };
+      }
+      if (op === "cdf") {
+        const k = requireField(p, "k", "poisson cdf");
+        return { distribution: "poisson", params: {lambda}, k, cdf: cdfVal(k) };
+      }
       if (op === "mean") return { distribution: "poisson", mean: lambda };
       if (op === "variance") return { distribution: "poisson", variance: lambda };
+      if (op === "sample") {
+        const n = requirePositiveInteger(p.n ?? 10, "poisson sample n");
+        const sample = [];
+        for (let i = 0; i < n; i++) {
+          const l = Math.exp(-lambda);
+          let k = 0;
+          let product = 1;
+          do {
+            k++;
+            product *= Math.random();
+          } while (product > l);
+          sample.push(k - 1);
+        }
+        return { distribution: "poisson", params: {lambda}, sample };
+      }
       break;
     }
     case "exponential": {
-      const lambda = p.lambda || 1;
+      const lambda = p.lambda ?? 1;
+      if (!(lambda > 0)) throw new Error("exponential requires lambda > 0");
       const pdf = (x) => x >= 0 ? lambda * Math.exp(-lambda*x) : 0;
       const cdf = (x) => x >= 0 ? 1 - Math.exp(-lambda*x) : 0;
-      if (op === "pdf") return { distribution: "exponential", params: {lambda}, x: p.x, pdf: pdf(p.x) };
-      if (op === "cdf") return { distribution: "exponential", params: {lambda}, x: p.x, cdf: cdf(p.x) };
+      if (op === "pdf") {
+        const x = requireField(p, "x", "exponential pdf");
+        return { distribution: "exponential", params: {lambda}, x, pdf: pdf(x) };
+      }
+      if (op === "cdf") {
+        const x = requireField(p, "x", "exponential cdf");
+        return { distribution: "exponential", params: {lambda}, x, cdf: cdf(x) };
+      }
       if (op === "mean") return { distribution: "exponential", mean: 1/lambda };
       if (op === "variance") return { distribution: "exponential", variance: 1/(lambda*lambda) };
       break;
     }
     case "chi2": {
-      const k = p.df || 1;
+      const k = requirePositiveInteger(p.df ?? 1, "chi2 df");
       const pdf = (x) => x > 0 ? Math.pow(x,k/2-1)*Math.exp(-x/2)/(Math.pow(2,k/2)*gammaFn(k/2)) : 0;
-      if (op === "pdf") return { distribution: "chi2", params: {df:k}, x: p.x, pdf: pdf(p.x) };
+      if (op === "pdf") {
+        const x = requireField(p, "x", "chi2 pdf");
+        return { distribution: "chi2", params: {df:k}, x, pdf: pdf(x) };
+      }
       if (op === "mean") return { distribution: "chi2", mean: k };
       if (op === "variance") return { distribution: "chi2", variance: 2*k };
       break;
     }
     case "t": {
-      const df = p.df || 1;
+      const df = requirePositiveInteger(p.df ?? 1, "t distribution df");
       const pdf = (x) => {
         const num = gammaFn((df+1)/2);
         const den = Math.sqrt(df*Math.PI)*gammaFn(df/2);
         return (num/den)*Math.pow(1+x*x/df, -(df+1)/2);
       };
-      if (op === "pdf") return { distribution: "t", params: {df}, x: p.x, pdf: pdf(p.x) };
+      if (op === "pdf") {
+        const x = requireField(p, "x", "t pdf");
+        return { distribution: "t", params: {df}, x, pdf: pdf(x) };
+      }
       if (op === "mean") return { distribution: "t", mean: df > 1 ? 0 : undefined };
       if (op === "variance") return { distribution: "t", variance: df > 2 ? df/(df-2) : undefined };
       break;
     }
     case "uniform": {
-      const a = p.a || 0, b = p.b || 1;
+      const a = p.a ?? 0;
+      const b = p.b ?? 1;
+      if (!(b > a)) throw new Error("uniform requires b > a");
       const pdf = (x) => (x >= a && x <= b) ? 1/(b-a) : 0;
       const cdf = (x) => x < a ? 0 : (x > b ? 1 : (x-a)/(b-a));
-      if (op === "pdf") return { distribution: "uniform", params: {a,b}, x: p.x, pdf: pdf(p.x) };
-      if (op === "cdf") return { distribution: "uniform", params: {a,b}, x: p.x, cdf: cdf(p.x) };
+      if (op === "pdf") {
+        const x = requireField(p, "x", "uniform pdf");
+        return { distribution: "uniform", params: {a,b}, x, pdf: pdf(x) };
+      }
+      if (op === "cdf") {
+        const x = requireField(p, "x", "uniform cdf");
+        return { distribution: "uniform", params: {a,b}, x, cdf: cdf(x) };
+      }
       if (op === "mean") return { distribution: "uniform", mean: (a+b)/2 };
       if (op === "variance") return { distribution: "uniform", variance: (b-a)**2/12 };
       break;
@@ -1424,27 +1628,35 @@ function calcHypothesisTest(args) {
 
   switch (test) {
     case "z_test": {
-      const { sample_mean, mu0, sigma, n, alpha } = p;
+      const sample_mean = requireField(p, "sample_mean", "z_test");
+      const mu0 = requireField(p, "mu0", "z_test");
+      const sigma = requireField(p, "sigma", "z_test");
+      const n = requirePositiveInteger(requireField(p, "n", "z_test"), "z_test n");
+      const alpha = p.alpha || 0.05;
+      if (!(sigma > 0)) throw new Error("z_test requires sigma > 0");
       const se = sigma / Math.sqrt(n);
       const z = (sample_mean - mu0) / se;
       const pValue = 2 * (1 - 0.5*(1+erfFn(Math.abs(z)/Math.sqrt(2))));
-      const critical = erfinv(1-(alpha||0.05)) * Math.sqrt(2);
-      return { test: "z_test", H0: `mu = ${mu0}`, z_statistic: z, p_value: pValue, significant: pValue < (alpha||0.05), critical_value: critical, conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+      const critical = erfinv(1-alpha) * Math.sqrt(2);
+      return { test: "z_test", H0: `mu = ${mu0}`, z_statistic: z, p_value: pValue, significant: pValue < alpha, critical_value: critical, conclusion: pValue < alpha ? "Reject H0" : "Fail to reject H0" };
     }
     case "t_test_one_sample": {
-      const { data, mu0, alpha } = p;
+      const data = requireArrayField(p, "data", "t_test_one_sample");
+      const mu0 = requireField(p, "mu0", "t_test_one_sample");
+      const alpha = p.alpha || 0.05;
       const n = data.length;
       const mean = data.reduce((a,b)=>a+b,0)/n;
       const variance = data.reduce((s,x)=>s+(x-mean)**2,0)/(n-1);
       const se = Math.sqrt(variance/n);
       const t = (mean - mu0) / se;
       const df = n - 1;
-      // Approximate p-value using normal approximation for t
       const pValue = 2 * (1 - 0.5*(1+erfFn(Math.abs(t)/Math.sqrt(2))));
-      return { test: "t_test_one_sample", H0: `mu = ${mu0}`, sample_mean: mean, sample_std: Math.sqrt(variance), t_statistic: t, df, p_value: pValue, significant: pValue < (alpha||0.05), conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+      return { test: "t_test_one_sample", H0: `mu = ${mu0}`, sample_mean: mean, sample_std: Math.sqrt(variance), t_statistic: t, df, p_value: pValue, significant: pValue < alpha, conclusion: pValue < alpha ? "Reject H0" : "Fail to reject H0" };
     }
     case "t_test_two_sample": {
-      const { data1, data2, alpha } = p;
+      const data1 = requireArrayField(p, "data1", "t_test_two_sample");
+      const data2 = requireArrayField(p, "data2", "t_test_two_sample");
+      const alpha = p.alpha || 0.05;
       const n1=data1.length, n2=data2.length;
       const m1=data1.reduce((a,b)=>a+b,0)/n1, m2=data2.reduce((a,b)=>a+b,0)/n2;
       const v1=data1.reduce((s,x)=>s+(x-m1)**2,0)/(n1-1), v2=data2.reduce((s,x)=>s+(x-m2)**2,0)/(n2-1);
@@ -1452,15 +1664,18 @@ function calcHypothesisTest(args) {
       const t = (m1 - m2) / se;
       const df = Math.pow(v1/n1+v2/n2,2) / (Math.pow(v1/n1,2)/(n1-1)+Math.pow(v2/n2,2)/(n2-1));
       const pValue = 2 * (1 - 0.5*(1+erfFn(Math.abs(t)/Math.sqrt(2))));
-      return { test: "t_test_two_sample", H0: "mu1 = mu2", mean1: m1, mean2: m2, t_statistic: t, df, p_value: pValue, significant: pValue < (alpha||0.05), conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+      return { test: "t_test_two_sample", H0: "mu1 = mu2", mean1: m1, mean2: m2, t_statistic: t, df, p_value: pValue, significant: pValue < alpha, conclusion: pValue < alpha ? "Reject H0" : "Fail to reject H0" };
     }
     case "chi2_gof": {
-      const { observed, expected, alpha } = p;
+      const observed = requireArrayField(p, "observed", "chi2_gof");
+      const expected = requireArrayField(p, "expected", "chi2_gof");
+      const alpha = p.alpha || 0.05;
+      if (observed.length !== expected.length) throw new Error("chi2_gof requires observed and expected arrays of the same length");
+      if (expected.some(v => v <= 0)) throw new Error("chi2_gof requires expected values > 0");
       const chi2 = observed.reduce((s,o,i) => s + (o-expected[i])**2/expected[i], 0);
       const df = observed.length - 1;
-      // Approximate p-value
       const pValue = 1 - 0.5*(1+erfFn(Math.sqrt(chi2/2)));
-      return { test: "chi2_gof", chi2_statistic: chi2, df, p_value: pValue, significant: pValue < (alpha||0.05), conclusion: pValue < (alpha||0.05) ? "Reject H0" : "Fail to reject H0" };
+      return { test: "chi2_gof", chi2_statistic: chi2, df, p_value: pValue, significant: pValue < alpha, conclusion: pValue < alpha ? "Reject H0" : "Fail to reject H0" };
     }
   }
   throw new Error(`Unknown test: ${test}`);
