@@ -1863,11 +1863,10 @@ export default {
     try {
       const message = await request.json();
       const result = await handleJsonRpc(message);
-      if (!result) return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*" } });
+      if (!result) return new Response("", { status: 202, headers: { "Access-Control-Allow-Origin": "*" } });
       return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
     } catch (e) {
       return new Response(JSON.stringify({ error: e.message }), { status: 400, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
     }
   }
 };
-
