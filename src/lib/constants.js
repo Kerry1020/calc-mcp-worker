@@ -1,6 +1,6 @@
 // Physical, mathematical and unit constants available in expressions.
 export const SERVER_NAME = "calc-mcp-worker";
-export const SERVER_VERSION = "1.0.0";
+export const SERVER_VERSION = "1.1.0";
 export const NUMERIC_EPSILON = 1e-12;
 export const MATRIX_EPSILON = 1e-12;
 

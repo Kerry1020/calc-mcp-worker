@@ -1,780 +1,251 @@
 # calc-mcp-worker
 
-中文 | [English](#english)
+English | [简体中文](README.zh-CN.md)
 
-## 中文
+[![CI](https://gh.qdp.qzz.io/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml/badge.svg)](https://gh.qdp.qzz.io/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml)
 
-一个运行在 Cloudflare Worker 上的数学计算 MCP 服务。**25 个工具**，**零依赖**，**无需 API Key**。
+A math-focused [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for Cloudflare Workers.
+It has **25 tools**, **zero runtime dependencies** and needs **no API keys**.
 
-适合做：表达式求值、微积分、方程求解、矩阵运算、统计分析、概率分布、回归、相关性、单位换算、绘图数据生成。
+Use it for expression evaluation, calculus, equation solving, matrices, descriptive statistics, probability distributions, hypothesis tests, regression, correlation, unit conversion, number theory and plot data.
 
-### 特点
+- Expressions go through a hand-written tokenizer and parser. User input never reaches `eval` or `Function`.
+- Every input is validated, and every loop and allocation is bounded (see [Limits](#limits)).
+- Special functions (erf, gamma, incomplete gamma/beta, t/χ²/F distributions) are accurate to about 1e-14.
+- Taylor coefficients come from automatic differentiation, so they are exact to machine precision.
 
-- 单次可批量计算最多 100 个表达式
-- 支持常数、复数、矩阵、后缀阶乘 `!`
-- `ln(x)` 是自然对数，`log(x)` / `log10(x)` 是常用对数（底 10）
-- 对奇异矩阵、非有限值、缺失参数优先返回明确错误
-- `calc_simplify` 是数值求值工具，不是符号 CAS
-- `calc_limit` 是数值极限分类，不是符号极限求解器
+## Endpoint and transport
 
-### 表达式语法
+The worker speaks JSON-RPC 2.0 over HTTP `POST`. This is MCP Streamable HTTP with JSON responses only.
+
+| Request | Response |
+| --- | --- |
+| `POST` (any path), JSON-RPC request or batch | `200` with JSON-RPC response(s) |
+| `POST` notification / client response only | `202`, empty body |
+| `POST` with invalid JSON | `400`, JSON-RPC error `-32700` |
+| `POST` with an invalid JSON-RPC message | `400`, JSON-RPC error `-32600` |
+| `POST` with a body over 1 MiB | `413` |
+| `GET` (browser / JSON) | `200` server info `{name, version, tools, mcp}` |
+| `GET` with `Accept: text/event-stream` | `405` (no SSE stream offered) |
+| `OPTIONS` | `204` CORS preflight |
+| other methods | `405` |
+
+Supported protocol versions are `2025-06-18`, `2025-03-26` and `2024-11-05`. If the client asks for one of them, the server echoes it. Otherwise it answers with the latest.
+
+Methods: `initialize`, `ping`, `tools/list`, `tools/call`. Notifications are accepted and never answered.
+
+### Client configuration
+
+Clients that support remote HTTP servers can connect directly:
+
+```json
+{
+  "mcpServers": {
+    "calc": { "url": "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp" }
+  }
+}
+```
+
+For stdio-only clients, use a bridge such as [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
+
+```json
+{
+  "mcpServers": {
+    "calc": { "command": "npx", "args": ["mcp-remote", "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp"] }
+  }
+}
+```
+
+### Errors
+
+- **Tool failures** come back as a normal tool result with `isError: true`. Examples are a singular matrix, an invalid argument or a non-finite result. The text content is `{"error": "..."}`, which lets the model read the message and retry.
+- **Protocol errors** use JSON-RPC error codes:
+  - `-32700` parse error
+  - `-32600` invalid request
+  - `-32601` unknown method
+  - `-32602` unknown tool or malformed `tools/call` params
+  - `-32603` internal error
+
+## Expression syntax
 
 ```text
 2+3*4              -> 14
 5!/(3!*2!)         -> 10
 sin(pi/6)          -> 0.5
 ln(e)              -> 1
-log(e)             -> 0.4342944819
+log(e)             -> 0.4342944819      (log is base 10)
+log(8, 2)          -> 3                 (explicit base)
 sqrt(2)            -> 1.414213562
 abs(-5+3i)         -> 5.830951895
 e^(i*pi)+1         -> 0
 2pi                -> 6.283185307
-[[1,2],[3,4]]      -> matrix literal
+2x^2  (x=3)        -> 18                (implicit multiplication binds looser than ^)
+1/2pi              -> 0.1591549431      (= 1/(2*pi): binds tighter than * and /)
+[[1,2],[3,4]]      -> matrix literal; [1,2;3,4] is equivalent
+h                  -> 6.62607015e-34
 ```
 
-### 工具总览（每个工具 1 个例子）
-
-#### 1) `calc_batch`
-批量计算多个表达式。
-
-```json
-{
-  "expressions": ["2+3*4", "5!/(3!*2!)", "ln(e)"]
-}
-```
-
-示例结果：返回 `14`、`10`、`1`。
-
-#### 2) `calc_single`
-计算单个表达式。
-
-```json
-{
-  "expression": "sin(pi/6)+sqrt(9)"
-}
-```
-
-示例结果：`3.5`
-
-#### 3) `calc_derivative`
-在指定点计算数值导数。
-
-```json
-{
-  "expression": "x^3",
-  "point": 2
-}
-```
-
-示例结果：约 `11.99999994`
-
-#### 4) `calc_integral`
-用 Simpson's rule 计算定积分。
-
-```json
-{
-  "expression": "x^2",
-  "a": 0,
-  "b": 1
-}
-```
-
-示例结果：约 `0.3333333333`
-
-#### 5) `calc_double_integral`
-计算矩形区域上的二重积分。
-
-```json
-{
-  "expression": "x+y",
-  "xa": 0,
-  "xb": 1,
-  "ya": 0,
-  "yb": 1
-}
-```
-
-示例结果：`1`
-
-#### 6) `calc_solve`
-求解 `f(x)=0`，支持 Newton / bisection。
-
-```json
-{
-  "expression": "x^2-2",
-  "method": "bisection",
-  "a": 1,
-  "b": 2
-}
-```
-
-示例结果：根约 `1.4142135623733338`
-
-#### 7) `calc_series`
-计算级数部分和。
-
-```json
-{
-  "expression": "1/n^2",
-  "n_start": 1,
-  "n_end": 5
-}
-```
-
-示例结果：和约 `1.4636111111111112`
-
-#### 8) `calc_limit`
-做数值极限分类。
-
-```json
-{
-  "expression": "1/x",
-  "approach": 0,
-  "direction": "right"
-}
-```
-
-示例结果：右极限分类为 `infinite`，值为 `Infinity`
-
-#### 9) `calc_taylor`
-计算 Taylor 展开系数。
-
-```json
-{
-  "expression": "exp(x)",
-  "x0": 0,
-  "order": 4
-}
-```
-
-示例结果：返回 0 到 4 阶系数和多项式字符串。
-
-#### 10) `calc_ode`
-解常微分方程 `dy/dx = f(x,y)`。
-
-```json
-{
-  "expression": "x+y",
-  "x0": 0,
-  "y0": 1,
-  "x_end": 1,
-  "steps": 5,
-  "method": "rk4"
-}
-```
-
-示例结果：返回一组 `(x, y)` 数值点。
-
-#### 11) `calc_matrix`
-矩阵运算：`det`、`inv`、`transpose`、`trace`、`eigen`、`add`、`sub`、`mul`。
-
-```json
-{
-  "operation": "inv",
-  "matrix": "[[4,7],[2,6]]"
-}
-```
-
-示例结果：
-
-```json
-[["0.6", "-0.7"], ["-0.2", "0.4"]]
-```
-
-#### 12) `calc_simplify`
-数值化简 / 代入求值，不做自由符号代数展开。
-
-```json
-{
-  "expression": "2*x+3",
-  "substitutions": { "x": 4 }
-}
-```
-
-示例结果：`11`
-
-#### 13) `calc_constants`
-列出或搜索内置常数。
-
-```json
-{
-  "query": "hbar"
-}
-```
-
-示例结果：返回 `hbar = 1.054571817e-34`
-
-#### 14) `calc_convert`
-单位换算。
-
-```json
-{
-  "value": 100,
-  "from": "C",
-  "to": "F"
-}
-```
-
-示例结果：`212`
-
-#### 15) `calc_stats`
-对一组数据做统计分析。
-
-```json
-{
-  "data": [1, 2, 2, 3, 4]
-}
-```
-
-示例结果：返回 mean、median、mode、stdev、variance、quartiles 等。
-
-#### 16) `calc_base_convert`
-进制转换，支持 2 到 36 进制。
-
-```json
-{
-  "value": "255",
-  "from_base": 10,
-  "to_base": 16
-}
-```
-
-示例结果：`FF`
-
-#### 17) `calc_prime`
-质数相关操作。
-
-```json
-{
-  "operation": "factorize",
-  "n": 84
-}
-```
-
-示例结果：`[2, 2, 3, 7]`
-
-#### 18) `calc_plot_data`
-生成绘图点数据。
-
-```json
-{
-  "expression": "x^2",
-  "x_min": -2,
-  "x_max": 2,
-  "points": 5
-}
-```
-
-示例结果：`x=[-2,-1,0,1,2]`，`y=[4,1,0,1,4]`
-
-#### 19) `calc_least_squares`
-最小二乘回归。
-
-```json
-{
-  "x": [1, 2, 3, 4],
-  "y": [2, 4.1, 5.9, 8.2],
-  "degree": 1
-}
-```
-
-示例结果：返回 slope、intercept、`r_squared`、residuals。
-
-#### 20) `calc_probability`
-概率分布工具：normal、binomial、poisson、exponential、uniform、chi2、t。
-
-```json
-{
-  "distribution": "normal",
-  "operation": "cdf",
-  "params": { "x": 1.96, "mean": 0, "std": 1 }
-}
-```
-
-示例结果：`cdf ≈ 0.9750021738917761`
-
-#### 21) `calc_hypothesis_test`
-假设检验：z-test、单样本 t-test、双样本 t-test、卡方拟合优度检验。
-
-```json
-{
-  "test": "z_test",
-  "params": {
-    "sample_mean": 5.2,
-    "mu0": 5,
-    "sigma": 1.5,
-    "n": 36
-  }
-}
-```
-
-示例结果：返回统计量、p 值、是否显著、结论。
-
-#### 22) `calc_confidence_interval`
-置信区间：均值、比例、方差。
-
-```json
-{
-  "type": "mean_t",
-  "data": [10, 12, 9, 11, 13],
-  "confidence": 0.95
-}
-```
-
-示例结果：下界约 `8.3253`，上界约 `13.6747`
-
-#### 23) `calc_anova`
-单因素方差分析。
-
-```json
-{
-  "groups": [[4, 5, 6], [5, 6, 7], [8, 9, 10]]
-}
-```
-
-示例结果：返回 `F_statistic`、`p_value`、显著性结论。
-
-#### 24) `calc_correlation`
-相关性 / 协方差分析。
-
-```json
-{
-  "x": [1, 2, 3, 4],
-  "y": [2, 4, 6, 8],
-  "method": "pearson"
-}
-```
-
-示例结果：`r ≈ 1`
-
-#### 25) `health`
-健康检查。
-
-```json
-{}
-```
-
-示例结果：
-
-```json
-{
-  "status": "ok",
-  "version": "1.0.0",
-  "tools": 25
-}
-```
-
-### 行为说明
-
-- 支持后缀阶乘 `!`，但只接受非负整数。
-- `calc_batch` 和 `calc_single` 都会拒绝 `NaN` / `Infinity` 结果。
-- `calc_matrix` 遇到奇异矩阵会报错，不会返回假的 `Infinity`。
-- `calc_probability` 和 `calc_hypothesis_test` 对缺失参数会显式报错。
-- `calc_simplify` 不支持真正的符号 `expand/factor`。
-- `calc_limit` 会返回左/右侧分类信息，如 `finite`、`infinite`、`unstable`。
-
-### 本地开发
-
-```bash
-npm install
-npm test
-npx wrangler dev --local --port 8791
-```
-
-### 部署
-
-```bash
-npx wrangler deploy
-```
-
----
-
-## English
-
-A math-focused MCP server running on Cloudflare Workers. **25 tools**, **zero dependencies**, **no API keys**.
-
-Good for expression evaluation, calculus, equation solving, matrix operations, statistics, probability, regression, correlation, unit conversion, and plotting data generation.
-
-### Highlights
-
-- Batch-evaluate up to 100 expressions in one call
-- Supports constants, complex numbers, matrices, and postfix factorial `!`
-- `ln(x)` is natural log; `log(x)` / `log10(x)` are base-10
-- Returns explicit errors for singular matrices, non-finite results, and missing required params
-- `calc_simplify` is a numeric evaluator, not a symbolic CAS
-- `calc_limit` is a numerical limit classifier, not a symbolic limit solver
-
-### Expression syntax
+- **Operators:** `+ - * / % ^` (`**` is an alias for `^`), postfix `!`, and `|x|` for absolute value.
+- **Precedence:** `+ -` < `* / %` < implicit multiplication < `^` < `!`. Unary minus applies after `^`, so `-x^2 = -(x^2)`.
+- **Functions:**
+  - Trigonometric: `sin cos tan sec csc cot asin acos atan atan2`
+  - Hyperbolic: `sinh cosh tanh asinh acosh atanh`
+  - Roots, powers and logs: `sqrt cbrt exp ln log log2 log10 pow`
+  - Rounding and sign: `abs ceil floor round sign`
+  - Aggregates: `max min`
+  - Special and integer functions: `factorial gamma erf mod gcd lcm binom rad deg`
+  - Statistics: `mean median stdev variance`. These take numbers or arrays, e.g. `mean(1,2,3)` or `mean([1,2,3])`.
+  - Complex: `re im conj arg csin ccos ctan csqrt cexp cln`
+- **Constants:** call `calc_constants` for the full list. It covers math constants such as `pi`, `e`, `phi` and `euler_gamma`, physics constants (CODATA 2018) such as `c`, `h`, `hbar`, `k`, `G`, `Na` and `R`, astronomy constants, and unit factors. `i` is the imaginary unit.
+- **Rejected input:** unknown characters, unbalanced brackets and trailing tokens are errors. They are never silently ignored.
+
+## Tools
+
+| # | Tool | Purpose | Example arguments | Example result |
+| --- | --- | --- | --- | --- |
+| 1 | `calc_batch` | Evaluate up to 100 expressions | `{"expressions": ["2+3*4", "5!/(3!*2!)", "ln(e)"]}` | `14`, `10`, `1` |
+| 2 | `calc_single` | Evaluate one expression | `{"expression": "sin(pi/6)+sqrt(9)"}` | `3.5` |
+| 3 | `calc_derivative` | Numerical derivative (Richardson extrapolation) | `{"expression": "x^3", "point": 2}` | `12` |
+| 4 | `calc_integral` | Definite integral, composite Simpson | `{"expression": "x^2", "a": 0, "b": 1}` | `0.3333333333` |
+| 5 | `calc_double_integral` | Double integral over a rectangle | `{"expression": "x+y", "xa": 0, "xb": 1, "ya": 0, "yb": 1}` | `1` |
+| 6 | `calc_solve` | Root of f(x)=0, Newton or bisection | `{"expression": "x^2-2", "method": "bisection", "a": 1, "b": 2}` | root `1.41421356237…` |
+| 7 | `calc_series` | Finite series sum (compensated) | `{"expression": "1/n^2", "n_start": 1, "n_end": 5}` | `1.4636111111111112` |
+| 8 | `calc_limit` | Numerical limit classification | `{"expression": "sin(x)/x", "approach": 0}` | limit `1` |
+| 9 | `calc_taylor` | Taylor coefficients (automatic differentiation) | `{"expression": "exp(x)", "order": 4}` | `[1, 1, 0.5, 0.1666…, 0.04166…]` |
+| 10 | `calc_ode` | dy/dx = f(x,y), Euler or RK4 | `{"expression": "x+y", "x0": 0, "y0": 1, "x_end": 1, "steps": 5}` | y(1) ≈ `3.4365` |
+| 11 | `calc_matrix` | det, inv, transpose, trace, eigen, add, sub, mul | `{"operation": "inv", "matrix": "[[4,7],[2,6]]"}` | `[["0.6","-0.7"],["-0.2","0.4"]]` |
+| 12 | `calc_simplify` | Numeric evaluation with substitutions (not a CAS) | `{"expression": "2*x+3", "substitutions": {"x": 4}}` | `11` |
+| 13 | `calc_constants` | List/search constants | `{"query": "hbar"}` | `1.054571817e-34` |
+| 14 | `calc_convert` | Unit conversion within a dimension | `{"value": 100, "from": "C", "to": "F"}` | `212` |
+| 15 | `calc_stats` | Descriptive statistics | `{"data": [1, 2, 2, 3, 4]}` | mean `2.4`, q1 `2`, q3 `3`, … |
+| 16 | `calc_base_convert` | Integer base conversion 2–36 (arbitrary size) | `{"value": "255", "to_base": 16}` | `FF` |
+| 17 | `calc_prime` | is_prime, factorize, nth_prime, primes_in_range, prime_count, next/prev | `{"operation": "factorize", "n": 84}` | `[2, 2, 3, 7]` |
+| 18 | `calc_plot_data` | x/y arrays for charting | `{"expression": "x^2", "x_min": -2, "x_max": 2, "points": 5}` | `y=[4,1,0,1,4]` |
+| 19 | `calc_least_squares` | Linear or polynomial (degree ≤ 10) least squares | `{"x": [1,2,3,4], "y": [2,4.1,5.9,8.2]}` | slope `2.04`, R² `0.99799` |
+| 20 | `calc_probability` | normal, binomial, poisson, exponential, uniform, chi2, t | `{"distribution": "normal", "operation": "cdf", "params": {"x": 1.96}}` | `0.9750021048517795` |
+| 21 | `calc_hypothesis_test` | z-test, one-sample t, Welch two-sample t, χ² GOF | `{"test": "z_test", "params": {"sample_mean": 5.2, "mu0": 5, "sigma": 1.5, "n": 36}}` | p `0.4237` |
+| 22 | `calc_confidence_interval` | mean (z / t), proportion, variance | `{"type": "mean_t", "data": [10,12,9,11,13]}` | `[9.0368, 12.9632]` |
+| 23 | `calc_anova` | One-way ANOVA (F distribution p-value) | `{"groups": [[4,5,6],[5,6,7],[8,9,10]]}` | F `13`, p `0.00659` |
+| 24 | `calc_correlation` | Pearson (with p-value), Spearman, Kendall τ-b, covariance | `{"x": [1,2,3,4], "y": [2,4,6,8]}` | r `1` |
+| 25 | `health` | Health check | `{}` | `{"status": "ok", "version": "1.1.0", "tools": 25}` |
+
+The optional `variables` argument (an object mapping names to numbers) is accepted by:
+
+- `calc_batch` and `calc_single`
+- `calc_derivative`, `calc_integral` and `calc_double_integral`
+- `calc_solve`, `calc_series`, `calc_limit` and `calc_taylor`
+- `calc_ode` and `calc_plot_data`
+
+### Notes on specific tools
+
+- **`precision`** (`calc_batch`, `calc_single`) is the number of *significant digits*, between 1 and 17. The default is 10.
+- **`calc_probability`:**
+  - `pdf` and `cdf` work for every distribution.
+  - `quantile` works for normal, exponential, uniform, chi2 and t.
+  - `sample` works for normal and poisson, with at most 10,000 draws.
+  - Moments that do not exist, such as the mean of t with df = 1, are returned as `null`.
+- **`calc_hypothesis_test`:** all tests are two-sided. t-tests use the exact Student t distribution, and the two-sample test is Welch's.
+- **`calc_confidence_interval`:** pass either `data` or summary statistics (`sample_mean`, `sample_std`, `n`).
+- **`calc_stats`:**
+  - Quartiles use linear interpolation (same as NumPy's default and Excel `QUARTILE.INC`).
+  - Skewness and excess kurtosis use population moments. They are `null` for constant data.
+- **`calc_convert`:**
+  - Supported dimensions: length, mass, pressure, energy, power, frequency, speed, volume, time and temperature (`C`/`F`/`K`).
+  - Unit names are case-sensitive, with an unambiguous case-insensitive fallback (`kwh` → `kWh`).
+  - Converting between different dimensions is an error.
+  - `nm` means **nautical mile** (kept for compatibility). Use `nmi` to be explicit.
+- **`calc_matrix`:**
+  - `eigen` returns the dominant eigenvalue (largest |λ|) by power iteration, together with a `converged` flag.
+  - It does not converge for complex or equal-magnitude dominant eigenvalues.
+  - Matrices may be given as expression strings or as JSON arrays.
+- **`calc_taylor`:**
+  - Supports the elementary functions, powers, `abs`, rounding functions, `atan2`, `erf`, and `max`/`min` of two arguments.
+  - `gamma`, `factorial` and the statistical functions of an x-dependent argument return an error.
+- **`calc_limit` and `calc_simplify`** are numerical tools. They do not do symbolic manipulation.
+
+## Limits
+
+Every bound below prevents unbounded CPU or memory use from untrusted input.
+
+| Limit | Value |
+| --- | --- |
+| HTTP request body | 1 MiB |
+| JSON-RPC batch | 50 messages |
+| Expression length / nesting depth | 20,000 chars / 1,000 |
+| `calc_batch` expressions | 100 |
+| Work budget for numerical tools | 5·10⁷ expression-node evaluations per call |
+| Integral subdivisions | 10⁶ (1-D), 2,000 per axis (2-D) |
+| Series terms / ODE steps / plot points | 10⁶ / 10⁵ / 10⁴ |
+| Solver iterations | 10,000 |
+| Taylor order | 50 |
+| Data arrays | 100,000 values (Kendall: 5,000) |
+| Matrix size | 100 × 100 |
+| `nth_prime` / `prime_count` / `primes_in_range` width | 10⁶ / 10⁷ / 10⁵ |
+| Integers for `calc_prime` | safe integers (≤ 2⁵³ − 1) |
+
+## Project layout
 
 ```text
-2+3*4              -> 14
-5!/(3!*2!)         -> 10
-sin(pi/6)          -> 0.5
-ln(e)              -> 1
-log(e)             -> 0.4342944819
-sqrt(2)            -> 1.414213562
-abs(-5+3i)         -> 5.830951895
-e^(i*pi)+1         -> 0
-2pi                -> 6.283185307
-[[1,2],[3,4]]      -> matrix literal
+src/index.js            Worker entry: HTTP, CORS, body limits
+src/protocol.js         JSON-RPC / MCP message handling
+src/tools/definitions.js  Tool names and input schemas (tools/list)
+src/tools/index.js      Tool dispatch
+src/tools/*.js          Tool handlers by area (expression, calculus, matrix, units, primes, statistics, probability)
+src/lib/expression.js   Tokenizer, parser, evaluator, builtins
+src/lib/special.js      Special functions and distributions
+src/lib/numeric.js      Numerical calculus
+src/lib/taylor.js       Taylor-mode automatic differentiation
+src/lib/matrix.js       Matrix algorithms
+src/lib/validate.js     Input validation and limits
+test/*.test.js          node:test suites
 ```
 
-### Tool reference with one example each
+## Development
 
-#### 1) `calc_batch`
-Evaluate multiple expressions in one request.
-
-```json
-{
-  "expressions": ["2+3*4", "5!/(3!*2!)", "ln(e)"]
-}
-```
-
-Example result: `14`, `10`, `1`
-
-#### 2) `calc_single`
-Evaluate one expression.
-
-```json
-{
-  "expression": "sin(pi/6)+sqrt(9)"
-}
-```
-
-Example result: `3.5`
-
-#### 3) `calc_derivative`
-Numerical derivative at a point.
-
-```json
-{
-  "expression": "x^3",
-  "point": 2
-}
-```
-
-Example result: about `11.99999994`
-
-#### 4) `calc_integral`
-Definite integral using Simpson's rule.
-
-```json
-{
-  "expression": "x^2",
-  "a": 0,
-  "b": 1
-}
-```
-
-Example result: about `0.3333333333`
-
-#### 5) `calc_double_integral`
-Double integral over a rectangular region.
-
-```json
-{
-  "expression": "x+y",
-  "xa": 0,
-  "xb": 1,
-  "ya": 0,
-  "yb": 1
-}
-```
-
-Example result: `1`
-
-#### 6) `calc_solve`
-Solve `f(x)=0` with Newton or bisection.
-
-```json
-{
-  "expression": "x^2-2",
-  "method": "bisection",
-  "a": 1,
-  "b": 2
-}
-```
-
-Example result: root about `1.4142135623733338`
-
-#### 7) `calc_series`
-Compute a finite series sum.
-
-```json
-{
-  "expression": "1/n^2",
-  "n_start": 1,
-  "n_end": 5
-}
-```
-
-Example result: about `1.4636111111111112`
-
-#### 8) `calc_limit`
-Numerically classify a limit.
-
-```json
-{
-  "expression": "1/x",
-  "approach": 0,
-  "direction": "right"
-}
-```
-
-Example result: right-hand classification `infinite`, value `Infinity`
-
-#### 9) `calc_taylor`
-Compute Taylor coefficients around `x0`.
-
-```json
-{
-  "expression": "exp(x)",
-  "x0": 0,
-  "order": 4
-}
-```
-
-Example result: returns coefficients and a polynomial string.
-
-#### 10) `calc_ode`
-Solve `dy/dx = f(x,y)` with Euler or RK4.
-
-```json
-{
-  "expression": "x+y",
-  "x0": 0,
-  "y0": 1,
-  "x_end": 1,
-  "steps": 5,
-  "method": "rk4"
-}
-```
-
-Example result: returns sampled `(x, y)` points.
-
-#### 11) `calc_matrix`
-Matrix operations: `det`, `inv`, `transpose`, `trace`, `eigen`, `add`, `sub`, `mul`.
-
-```json
-{
-  "operation": "inv",
-  "matrix": "[[4,7],[2,6]]"
-}
-```
-
-Example result:
-
-```json
-[["0.6", "-0.7"], ["-0.2", "0.4"]]
-```
-
-#### 12) `calc_simplify`
-Numeric simplification / substitution-based evaluation.
-
-```json
-{
-  "expression": "2*x+3",
-  "substitutions": { "x": 4 }
-}
-```
-
-Example result: `11`
-
-#### 13) `calc_constants`
-List or search built-in constants.
-
-```json
-{
-  "query": "hbar"
-}
-```
-
-Example result: `hbar = 1.054571817e-34`
-
-#### 14) `calc_convert`
-Unit conversion.
-
-```json
-{
-  "value": 100,
-  "from": "C",
-  "to": "F"
-}
-```
-
-Example result: `212`
-
-#### 15) `calc_stats`
-Descriptive statistics for a dataset.
-
-```json
-{
-  "data": [1, 2, 2, 3, 4]
-}
-```
-
-Example result: returns mean, median, mode, stdev, variance, quartiles, and more.
-
-#### 16) `calc_base_convert`
-Convert numbers between bases 2 through 36.
-
-```json
-{
-  "value": "255",
-  "from_base": 10,
-  "to_base": 16
-}
-```
-
-Example result: `FF`
-
-#### 17) `calc_prime`
-Prime number utilities.
-
-```json
-{
-  "operation": "factorize",
-  "n": 84
-}
-```
-
-Example result: `[2, 2, 3, 7]`
-
-#### 18) `calc_plot_data`
-Generate `x` / `y` arrays for plotting.
-
-```json
-{
-  "expression": "x^2",
-  "x_min": -2,
-  "x_max": 2,
-  "points": 5
-}
-```
-
-Example result: `x=[-2,-1,0,1,2]`, `y=[4,1,0,1,4]`
-
-#### 19) `calc_least_squares`
-Least-squares regression.
-
-```json
-{
-  "x": [1, 2, 3, 4],
-  "y": [2, 4.1, 5.9, 8.2],
-  "degree": 1
-}
-```
-
-Example result: returns slope, intercept, `r_squared`, and residuals.
-
-#### 20) `calc_probability`
-Probability distribution helper for normal, binomial, poisson, exponential, uniform, chi-square, and t.
-
-```json
-{
-  "distribution": "normal",
-  "operation": "cdf",
-  "params": { "x": 1.96, "mean": 0, "std": 1 }
-}
-```
-
-Example result: `cdf ≈ 0.9750021738917761`
-
-#### 21) `calc_hypothesis_test`
-Hypothesis testing utilities.
-
-```json
-{
-  "test": "z_test",
-  "params": {
-    "sample_mean": 5.2,
-    "mu0": 5,
-    "sigma": 1.5,
-    "n": 36
-  }
-}
-```
-
-Example result: returns the test statistic, p-value, significance flag, and conclusion.
-
-#### 22) `calc_confidence_interval`
-Confidence intervals for means, proportions, and variance.
-
-```json
-{
-  "type": "mean_t",
-  "data": [10, 12, 9, 11, 13],
-  "confidence": 0.95
-}
-```
-
-Example result: lower bound about `8.3253`, upper bound about `13.6747`
-
-#### 23) `calc_anova`
-One-way ANOVA.
-
-```json
-{
-  "groups": [[4, 5, 6], [5, 6, 7], [8, 9, 10]]
-}
-```
-
-Example result: returns `F_statistic`, `p_value`, and significance conclusion.
-
-#### 24) `calc_correlation`
-Correlation / covariance analysis.
-
-```json
-{
-  "x": [1, 2, 3, 4],
-  "y": [2, 4, 6, 8],
-  "method": "pearson"
-}
-```
-
-Example result: `r ≈ 1`
-
-#### 25) `health`
-Service health check.
-
-```json
-{}
-```
-
-Example result:
-
-```json
-{
-  "status": "ok",
-  "version": "1.0.0",
-  "tools": 25
-}
-```
-
-### Behavior notes
-
-- Postfix factorial `!` is supported for non-negative integers only.
-- Both `calc_batch` and `calc_single` reject `NaN` / `Infinity` outputs.
-- `calc_matrix` throws a real error for singular matrices instead of returning fake `Infinity` values.
-- `calc_probability` and `calc_hypothesis_test` explicitly validate required parameters.
-- `calc_simplify` does not provide true symbolic `expand` / `factor` behavior.
-- `calc_limit` includes directional classifications such as `finite`, `infinite`, and `unstable`.
-
-### Local development
+You need Node.js 20 or newer. There are no runtime dependencies to install.
 
 ```bash
-npm install
-npm test
-npx wrangler dev --local --port 8791
+npm test                          # run the test suite (node:test)
+npx wrangler dev                  # local dev server on http://localhost:8787
 ```
 
-### Deploy
+Smoke test against a local server:
 
 ```bash
+curl -s localhost:8787/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"calc_single","arguments":{"expression":"2x^2","variables":{"x":3}}}}'
+```
+
+CI (GitHub Actions) runs the tests on Node 20 and 22 for pushes to `main` and for pull requests.
+
+## Deployment
+
+```bash
+npx wrangler login
 npx wrangler deploy
 ```
 
+The server is public and unauthenticated, and CORS allows any origin. If you need access control, put it behind Cloudflare Access or add an auth check in `src/index.js`.
+
+## Compatibility notes (1.1.0)
+
+Tool names, their order and their input schemas are unchanged. The only schema changes are new optional properties. Some outputs changed because the old behavior was wrong:
+
+- **Tool errors:** these are now `isError` tool results instead of JSON-RPC error `-32000`.
+- **Implicit multiplication:** `2x^2` now means `2*(x^2)`. It used to mean `(2x)^2`.
+- **Malformed input:**
+  - Trailing tokens, unknown characters and unbalanced brackets are now errors. They used to be silently ignored.
+  - `2e` now means `2*e`. It used to be `2`.
+- **Small values:** nonzero values below 1e-15 are no longer displayed as `0`.
+- **`precision`:** this now means significant digits throughout, including exponential output.
+- **Statistics:**
+  - p-values for t-tests, χ² GOF, ANOVA and Pearson are now correct. The old ones came from normal or ad-hoc approximations.
+  - Quartiles, skewness, kurtosis, Spearman with ties and Kendall with ties now follow the standard definitions.
+- **`calc_convert`:**
+  - Output reports the canonical unit names.
+  - Mismatched dimensions are rejected.
+- **`calc_limit`:** non-finite samples are now reported as strings such as `"NaN"` or `"Infinity"`. They used to be `null`.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 — see the [LICENSE](LICENSE) file for details.
+[GPL-3.0](LICENSE)
