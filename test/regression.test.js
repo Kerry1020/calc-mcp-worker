@@ -90,8 +90,9 @@ test('non-finite batch result is reported per-expression', () => {
   assert.match(batch.batch[0].error ?? '', /non-finite/i);
 });
 
-test('tool errors surface through JSON-RPC', async () => {
+test('tool errors surface as isError tool results (MCP spec)', async () => {
   const rpc = await handleJsonRpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'calc_matrix', arguments: { operation: 'inv', matrix: '[[1,2],[2,4]]' } } });
-  assert.equal(rpc.error.code, -32000);
-  assert.match(rpc.error.message, /singular/i);
+  assert.equal(rpc.error, undefined);
+  assert.equal(rpc.result.isError, true);
+  assert.match(JSON.parse(rpc.result.content[0].text).error, /singular/i);
 });
