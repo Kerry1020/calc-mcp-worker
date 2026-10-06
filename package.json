@@ -2,7 +2,16 @@
   "name": "calc-mcp-worker",
   "version": "1.0.0",
   "private": true,
+  "description": "Math computation MCP server (expressions, calculus, matrices, statistics, probability) for Cloudflare Workers",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "test": "node test/regression.mjs"
+    "test": "node --test",
+    "dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy"
   }
 }
