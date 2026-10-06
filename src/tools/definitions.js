@@ -11,7 +11,7 @@ export const TOOLS = [
           items: { type: "string" },
           description: "Array of math expressions to evaluate (up to 100)"
         },
-        precision: { type: "number", description: "Decimal places for output, default 10" },
+        precision: { type: "number", description: "Significant digits for output (1-17), default 10" },
         variables: { type: "object", description: "Variable assignments: {\"x\": 3, \"y\": 5}" }
       },
       required: ["expressions"]
@@ -19,13 +19,13 @@ export const TOOLS = [
   },
   {
     name: "calc_single",
-    description: "Evaluate a single math expression. Supports: arithmetic, trig, log, exp, factorial, gamma, erf, complex numbers (use 'i'), matrices ([a,b;c,d]), all constants.",
+    description: "Evaluate a single math expression. Supports: arithmetic, trig, ln/log (log(x) is base 10, log(x,b) any base), exp, factorial, gamma, erf, complex numbers (use 'i'), matrices ([[a,b],[c,d]] or [a,b;c,d]), all constants. Implicit multiplication binds tighter than * and / but looser than ^ (2x^2 = 2*(x^2), 1/2pi = 1/(2*pi)).",
     inputSchema: {
       type: "object",
       properties: {
         expression: { type: "string", description: "Math expression" },
         variables: { type: "object", description: "Variable assignments" },
-        precision: { type: "number", description: "Decimal places, default 10" }
+        precision: { type: "number", description: "Significant digits (1-17), default 10" }
       },
       required: ["expression"]
     }
@@ -67,7 +67,8 @@ export const TOOLS = [
         expression: { type: "string", description: "Integrand f(x,y)" },
         xa: { type: "number" }, xb: { type: "number" },
         ya: { type: "number" }, yb: { type: "number" },
-        n: { type: "number", description: "Subdivisions per axis, default 50" }
+        n: { type: "number", description: "Subdivisions per axis, default 50" },
+        variables: { type: "object" }
       },
       required: ["expression", "xa", "xb", "ya", "yb"]
     }
@@ -84,7 +85,8 @@ export const TOOLS = [
         tol: { type: "number", description: "Tolerance, default 1e-12" },
         max_iter: { type: "number", description: "Max iterations, default 100" },
         a: { type: "number", description: "For bisection: lower bound" },
-        b: { type: "number", description: "For bisection: upper bound" }
+        b: { type: "number", description: "For bisection: upper bound" },
+        variables: { type: "object" }
       },
       required: ["expression"]
     }
@@ -98,7 +100,8 @@ export const TOOLS = [
         expression: { type: "string", description: "General term, e.g. '1/n^2'" },
         n_start: { type: "number", description: "Start index, default 1" },
         n_end: { type: "number", description: "End index" },
-        variable: { type: "string", description: "Index variable name, default n" }
+        variable: { type: "string", description: "Index variable name, default n" },
+        variables: { type: "object" }
       },
       required: ["expression", "n_end"]
     }
@@ -111,20 +114,22 @@ export const TOOLS = [
       properties: {
         expression: { type: "string", description: "f(x)" },
         approach: { type: "number", description: "Value x approaches" },
-        direction: { type: "string", enum: ["both", "left", "right"], description: "Direction, default both" }
+        direction: { type: "string", enum: ["both", "left", "right"], description: "Direction, default both" },
+        variables: { type: "object" }
       },
       required: ["expression", "approach"]
     }
   },
   {
     name: "calc_taylor",
-    description: "Compute Taylor series expansion of f(x) around x0 to given order.",
+    description: "Compute Taylor series coefficients of f(x) around x0 to given order (exact to machine precision via automatic differentiation, max order 50).",
     inputSchema: {
       type: "object",
       properties: {
         expression: { type: "string", description: "f(x)" },
         x0: { type: "number", description: "Center point, default 0" },
-        order: { type: "number", description: "Order of expansion, default 5" }
+        order: { type: "number", description: "Order of expansion, default 5" },
+        variables: { type: "object" }
       },
       required: ["expression"]
     }
@@ -140,14 +145,15 @@ export const TOOLS = [
         y0: { type: "number", description: "Initial y" },
         x_end: { type: "number", description: "End x" },
         steps: { type: "number", description: "Number of steps, default 100" },
-        method: { type: "string", enum: ["euler", "rk4"], description: "Method, default rk4" }
+        method: { type: "string", enum: ["euler", "rk4"], description: "Method, default rk4" },
+        variables: { type: "object" }
       },
       required: ["expression", "x0", "y0", "x_end"]
     }
   },
   {
     name: "calc_matrix",
-    description: "Matrix operations: add, sub, mul, det, inv, transpose, trace, eigen. Input as [[a,b],[c,d]].",
+    description: "Matrix operations: add, sub, mul, det, inv, transpose, trace, eigen (dominant eigenvalue by power iteration). Input as [[a,b],[c,d]] (max 100x100).",
     inputSchema: {
       type: "object",
       properties: {
@@ -183,7 +189,7 @@ export const TOOLS = [
   },
   {
     name: "calc_convert",
-    description: "Unit conversion between common units. Supports length, mass, pressure, energy, temperature.",
+    description: "Unit conversion between common units of the same dimension: length, mass, pressure, energy, power, frequency, speed, volume, time, temperature (C/F/K). Unit names are case-sensitive with an unambiguous case-insensitive fallback; 'nm' is the nautical mile.",
     inputSchema: {
       type: "object",
       properties: {
@@ -196,7 +202,7 @@ export const TOOLS = [
   },
   {
     name: "calc_stats",
-    description: "Statistical analysis of a dataset: mean, median, mode, stdev, variance, min, max, quartiles, skewness, kurtosis.",
+    description: "Statistical analysis of a dataset: mean, median, mode, sample stdev/variance, min, max, quartiles (linear interpolation), skewness and excess kurtosis (population moments).",
     inputSchema: {
       type: "object",
       properties: {
@@ -261,7 +267,7 @@ export const TOOLS = [
   },
   {
     name: "calc_probability",
-    description: "Probability distributions: normal CDF/PDF, binomial, poisson, uniform, exponential, chi-square, t-distribution.",
+    description: "Probability distributions: normal, binomial, poisson, uniform, exponential, chi-square, t. pdf/cdf for all; quantile for normal, exponential, uniform, chi2, t; sample for normal and poisson.",
     inputSchema: {
       type: "object",
       properties: {
@@ -274,7 +280,7 @@ export const TOOLS = [
   },
   {
     name: "calc_hypothesis_test",
-    description: "Hypothesis testing: z-test, t-test (one-sample, two-sample), chi-square goodness of fit.",
+    description: "Hypothesis testing (two-sided): z-test, t-test (one-sample, Welch two-sample) with exact t p-values, chi-square goodness of fit.",
     inputSchema: {
       type: "object",
       properties: {
@@ -293,8 +299,8 @@ export const TOOLS = [
         type: { type: "string", enum: ["mean_z", "mean_t", "proportion", "variance"], description: "CI type" },
         data: { type: "array", items: { type: "number" }, description: "Sample data (for mean_z, mean_t, variance)" },
         confidence: { type: "number", description: "Confidence level 0-1, default 0.95" },
-        sample_mean: { type: "number", description: "For proportion/variance" },
-        sample_std: { type: "number" },
+        sample_mean: { type: "number", description: "Sample mean (mean_z/mean_t without data)" },
+        sample_std: { type: "number", description: "Sample standard deviation (mean_t/variance without data)" },
         n: { type: "number", description: "Sample size" },
         p: { type: "number", description: "Proportion (for proportion CI)" },
         sigma: { type: "number", description: "Known population std (for mean_z)" }

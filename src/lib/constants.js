@@ -51,7 +51,7 @@ export const CONSTANTS = {
   yard: 0.9144, nm: 1852, // nautical mile
   ton: 1000, g: 0.001, mg: 0.000001,
   liter: 0.001, mL: 0.000001, gallon: 0.003785411784,
-  mph: 0.44704, kph: 0.277778, knot: 0.514444,
+  mph: 0.44704, kph: 1000 / 3600, knot: 1852 / 3600,
   Pa: 1, kPa: 1000, MPa: 1e6, psi: 6894.757293168,
   J: 1, kJ: 1000, MJ: 1e6, Wh: 3600, kWh: 3.6e6, BTU: 1055.06,
   W: 1, kW: 1000, MW: 1e6,
