@@ -1,18 +1,33 @@
 # calc-mcp-worker
 
+[![CI](https://github.com/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6E56CF)](https://modelcontextprotocol.io)
+
 English | [简体中文](README.zh-CN.md)
 
-[![CI](https://gh.qdp.qzz.io/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml/badge.svg)](https://gh.qdp.qzz.io/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml)
-
 A math-focused [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for Cloudflare Workers.
-It has **25 tools**, **zero runtime dependencies** and needs **no API keys**.
 
-Use it for expression evaluation, calculus, equation solving, matrices, descriptive statistics, probability distributions, hypothesis tests, regression, correlation, unit conversion, number theory and plot data.
+## Features
 
+- **25 tools**, **zero runtime dependencies**, **no API keys**.
+- Use it for expression evaluation, calculus, equation solving, matrices, descriptive statistics, probability distributions, hypothesis tests, regression, correlation, unit conversion, number theory and plot data.
 - Expressions go through a hand-written tokenizer and parser. User input never reaches `eval` or `Function`.
 - Every input is validated, and every loop and allocation is bounded (see [Limits](#limits)).
 - Special functions (erf, gamma, incomplete gamma/beta, t/χ²/F distributions) are accurate to about 1e-14.
 - Taylor coefficients come from automatic differentiation, so they are exact to machine precision.
+
+## Quick start
+
+```bash
+git clone https://github.com/Kerry1020/calc-mcp-worker.git
+cd calc-mcp-worker
+npx wrangler deploy
+claude mcp add --transport http calc https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp
+```
+
+No secrets or bindings are needed. Then ask your agent something like "integrate x^2 from 0 to 1".
 
 ## Endpoint and transport
 
@@ -33,28 +48,6 @@ The worker speaks JSON-RPC 2.0 over HTTP `POST`. This is MCP Streamable HTTP wit
 Supported protocol versions are `2025-06-18`, `2025-03-26` and `2024-11-05`. If the client asks for one of them, the server echoes it. Otherwise it answers with the latest.
 
 Methods: `initialize`, `ping`, `tools/list`, `tools/call`. Notifications are accepted and never answered.
-
-### Client configuration
-
-Clients that support remote HTTP servers can connect directly:
-
-```json
-{
-  "mcpServers": {
-    "calc": { "url": "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp" }
-  }
-}
-```
-
-For stdio-only clients, use a bridge such as [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
-
-```json
-{
-  "mcpServers": {
-    "calc": { "command": "npx", "args": ["mcp-remote", "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp"] }
-  }
-}
-```
 
 ### Errors
 
@@ -183,6 +176,49 @@ Every bound below prevents unbounded CPU or memory use from untrusted input.
 | `nth_prime` / `prime_count` / `primes_in_range` width | 10⁶ / 10⁷ / 10⁵ |
 | Integers for `calc_prime` | safe integers (≤ 2⁵³ − 1) |
 
+## Configuration
+
+None. The worker reads no environment variables, secrets or bindings. `wrangler.toml` only sets the worker name, entry point, `compatibility_date`, `workers_dev = true` and observability.
+
+## MCP client config
+
+The worker answers MCP on any path; `/mcp` is the conventional one.
+
+**Claude Code:**
+
+```bash
+claude mcp add --transport http calc https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp
+```
+
+**Clients with remote HTTP support** can connect directly:
+
+```json
+{
+  "mcpServers": {
+    "calc": { "url": "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp" }
+  }
+}
+```
+
+**Claude Desktop / stdio-only clients** via [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
+
+```json
+{
+  "mcpServers": {
+    "calc": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp"]
+    }
+  }
+}
+```
+
+## Security notes
+
+- There is no built-in authentication: every endpoint is public and CORS allows any origin. The worker is stateless, holds no secrets and makes no outbound requests, so the main exposure is someone else spending your Workers CPU quota.
+- If you need access control, put the worker behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) or add a bearer-token check in `src/index.js` (store the token with `npx wrangler secret put AUTH_TOKEN`).
+- All untrusted input is bounded; see [Limits](#limits).
+
 ## Project layout
 
 ```text
@@ -225,7 +261,7 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-The server is public and unauthenticated, and CORS allows any origin. If you need access control, put it behind Cloudflare Access or add an auth check in `src/index.js`.
+The worker is published at `https://calc-mcp-worker.<your-subdomain>.workers.dev`. `npm run deploy` runs the same command. Read [Security notes](#security-notes) before exposing it publicly.
 
 ## Compatibility notes (1.1.0)
 
@@ -246,6 +282,16 @@ Tool names, their order and their input schemas are unchanged. The only schema c
   - Mismatched dimensions are rejected.
 - **`calc_limit`:** non-finite samples are now reported as strings such as `"NaN"` or `"Infinity"`. They used to be `null`.
 
+## Related projects
+
+- [time-mcp-worker](https://github.com/Kerry1020/time-mcp-worker) — time zone lookup, conversion and time differences
+- [geo-mcp-worker](https://github.com/Kerry1020/geo-mcp-worker) — geocoding, POI search and routing via OpenStreetMap services
+- [memory-mcp-worker](https://github.com/Kerry1020/memory-mcp-worker) — persistent KV-backed memory for agents
+- [webhook-inbox-mcp-worker](https://github.com/Kerry1020/webhook-inbox-mcp-worker) — receive webhooks into KV and read them as MCP tools
+- [summarize-mcp-worker](https://github.com/Kerry1020/summarize-mcp-worker) — web page extraction and extractive summarization
+- [image-mcp-worker](https://github.com/Kerry1020/image-mcp-worker) — image generation via any OpenAI-compatible images API
+- [search-mcp-worker](https://github.com/Kerry1020/search-mcp-worker) — multi-engine web search with open, auditable ranking
+
 ## License
 
-[GPL-3.0](LICENSE)
+[GNU General Public License v3.0](LICENSE) (GPL-3.0-only).

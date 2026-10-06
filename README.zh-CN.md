@@ -1,17 +1,33 @@
 # calc-mcp-worker
 
+[![CI](https://github.com/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6E56CF)](https://modelcontextprotocol.io)
+
 [English](README.md) | 简体中文
 
-[![CI](https://gh.qdp.qzz.io/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml/badge.svg)](https://gh.qdp.qzz.io/Kerry1020/calc-mcp-worker/actions/workflows/ci.yml)
+一个运行在 Cloudflare Workers 上的数学计算 [MCP](https://modelcontextprotocol.io) 服务。
 
-一个运行在 Cloudflare Workers 上的数学计算 [MCP](https://modelcontextprotocol.io) 服务。共有 **25 个工具**，**零运行时依赖**，**无需 API Key**。
+## 功能特性
 
-用途：表达式求值、微积分、方程求解、矩阵运算、描述统计、概率分布、假设检验、回归、相关性、单位换算、数论、绘图数据。
-
+- 共 **25 个工具**，**零运行时依赖**，**无需 API Key**。
+- 用途：表达式求值、微积分、方程求解、矩阵运算、描述统计、概率分布、假设检验、回归、相关性、单位换算、数论、绘图数据。
 - 表达式由手写的词法分析器和解析器处理，用户输入绝不会进入 `eval` / `Function`。
 - 所有输入都会校验，所有循环和内存分配都有上限（见[资源限制](#资源限制)）。
 - 特殊函数（erf、gamma、不完全 gamma/beta、t/χ²/F 分布）精度约为 1e-14。
 - Taylor 系数由自动微分计算，精确到机器精度。
+
+## 快速开始
+
+```bash
+git clone https://github.com/Kerry1020/calc-mcp-worker.git
+cd calc-mcp-worker
+npx wrangler deploy
+claude mcp add --transport http calc https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp
+```
+
+不需要配置任何 secret 或绑定。部署后就可以让 Agent 试试“求 x^2 在 0 到 1 上的积分”。
 
 ## 接口与传输
 
@@ -32,28 +48,6 @@
 支持的协议版本为 `2025-06-18`、`2025-03-26`、`2024-11-05`。客户端请求其中之一时原样返回，否则返回最新版本。
 
 支持的方法：`initialize`、`ping`、`tools/list`、`tools/call`。通知会被接收，但不会回复。
-
-### 客户端配置
-
-支持远程 HTTP 的客户端可以直接连接：
-
-```json
-{
-  "mcpServers": {
-    "calc": { "url": "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp" }
-  }
-}
-```
-
-只支持 stdio 的客户端，可以通过 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) 桥接：
-
-```json
-{
-  "mcpServers": {
-    "calc": { "command": "npx", "args": ["mcp-remote", "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp"] }
-  }
-}
-```
 
 ### 错误处理
 
@@ -182,6 +176,49 @@ h                  -> 6.62607015e-34
 | `nth_prime` / `prime_count` / `primes_in_range` 区间宽度 | 10⁶ / 10⁷ / 10⁵ |
 | `calc_prime` 整数范围 | 安全整数（≤ 2⁵³ − 1） |
 
+## 配置
+
+无需任何配置。Worker 不读取环境变量、secret 或绑定。`wrangler.toml` 里只有 Worker 名称、入口文件、`compatibility_date`、`workers_dev = true` 和 observability 设置。
+
+## MCP 客户端配置
+
+Worker 在任意路径上都响应 MCP 请求，习惯上使用 `/mcp`。
+
+**Claude Code：**
+
+```bash
+claude mcp add --transport http calc https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp
+```
+
+**支持远程 HTTP 的客户端**可以直接连接：
+
+```json
+{
+  "mcpServers": {
+    "calc": { "url": "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp" }
+  }
+}
+```
+
+**Claude Desktop / 只支持 stdio 的客户端**可以通过 [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) 桥接：
+
+```json
+{
+  "mcpServers": {
+    "calc": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://calc-mcp-worker.<your-subdomain>.workers.dev/mcp"]
+    }
+  }
+}
+```
+
+## 安全说明
+
+- 没有内置鉴权：所有接口都是公开的，CORS 允许任意来源。Worker 本身无状态、不保存任何密钥、也不发起外部请求，所以主要风险是别人消耗你的 Workers CPU 额度。
+- 如需访问控制，可以放在 [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) 之后，或在 `src/index.js` 中加一段 Bearer Token 校验（Token 用 `npx wrangler secret put AUTH_TOKEN` 保存）。
+- 所有不可信输入都有上限，见[资源限制](#资源限制)。
+
 ## 目录结构
 
 ```text
@@ -224,7 +261,7 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-服务是公开的，没有鉴权，CORS 允许任意来源。如需访问控制，可放在 Cloudflare Access 之后，或在 `src/index.js` 中加入鉴权逻辑。
+部署后地址为 `https://calc-mcp-worker.<your-subdomain>.workers.dev`。`npm run deploy` 执行的是同一条命令。公开部署前请先看[安全说明](#安全说明)。
 
 ## 兼容性说明（1.1.0）
 
@@ -245,6 +282,16 @@ npx wrangler deploy
   - 量纲不一致时报错。
 - **`calc_limit`：** 非有限的采样值现在以字符串（如 `"NaN"`、`"Infinity"`）返回，旧版为 `null`。
 
+## 相关项目
+
+- [time-mcp-worker](https://github.com/Kerry1020/time-mcp-worker) — 时区查询、时间换算与时间差计算
+- [geo-mcp-worker](https://github.com/Kerry1020/geo-mcp-worker) — 基于 OpenStreetMap 服务的地理编码、POI 搜索和路线规划
+- [memory-mcp-worker](https://github.com/Kerry1020/memory-mcp-worker) — 基于 KV 的 Agent 持久化记忆
+- [webhook-inbox-mcp-worker](https://github.com/Kerry1020/webhook-inbox-mcp-worker) — 把 Webhook 收进 KV，再通过 MCP 工具读取
+- [summarize-mcp-worker](https://github.com/Kerry1020/summarize-mcp-worker) — 网页正文提取与抽取式摘要
+- [image-mcp-worker](https://github.com/Kerry1020/image-mcp-worker) — 对接任意 OpenAI 兼容图像接口的图片生成
+- [search-mcp-worker](https://github.com/Kerry1020/search-mcp-worker) — 多引擎网页搜索，排序规则公开可审计
+
 ## 许可证
 
-[GPL-3.0](LICENSE)
+[GNU 通用公共许可证 v3.0](LICENSE)（GPL-3.0-only）。
